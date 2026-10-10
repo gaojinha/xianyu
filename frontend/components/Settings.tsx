@@ -38,6 +38,17 @@ import {
   SectionHeader,
 } from './ui';
 
+// 常用邮箱 SMTP 预设：选中后自动填服务器与端口，省得手查。
+const SMTP_PRESETS = [
+  { key: 'qq', label: 'QQ 邮箱', server: 'smtp.qq.com', port: 465, ssl: true },
+  { key: '163', label: '163 邮箱', server: 'smtp.163.com', port: 465, ssl: true },
+  { key: '126', label: '126 邮箱', server: 'smtp.126.com', port: 465, ssl: true },
+  { key: 'exmail', label: '企业微信 / 腾讯企业邮箱', server: 'smtp.exmail.qq.com', port: 465, ssl: true },
+  { key: 'gmail', label: 'Gmail', server: 'smtp.gmail.com', port: 587, ssl: false, tls: true },
+  { key: 'outlook', label: 'Outlook / Office365', server: 'smtp.office365.com', port: 587, ssl: false, tls: true },
+  { key: 'custom', label: '自定义（手动填写）', server: '', port: 587 },
+];
+
 type SettingsSection = 'general' | 'ai' | 'email' | 'phrases' | 'notice';
 
 // 常用客服短语预设：一键载入、开箱即用。口径与"话术红线"一致（不承诺库存/时效/赔付）。
@@ -262,6 +273,25 @@ const Settings: React.FC = () => {
   };
 
   if (!settings) return <PageLoading label="正在加载系统设置" />;
+
+  const matchedSmtpKey = SMTP_PRESETS.find(
+    (preset) => preset.server && preset.server === settings.smtp_server,
+  )?.key || 'custom';
+
+  const applySmtpPreset = (key: string) => {
+    const preset = SMTP_PRESETS.find((item) => item.key === key);
+    if (!preset || preset.key === 'custom') {
+      setSettings((current) => (current ? { ...current, smtp_server: '' } : current));
+      return;
+    }
+    setSettings((current) => (current ? {
+      ...current,
+      smtp_server: preset.server,
+      smtp_port: preset.port,
+      smtp_use_ssl: preset.ssl ?? current.smtp_use_ssl,
+      smtp_use_tls: preset.tls ?? current.smtp_use_tls,
+    } : current));
+  };
 
   return (
     <div className="page-stack animate-fade-in">
@@ -747,6 +777,22 @@ const Settings: React.FC = () => {
             icon={Mail}
           />
           <div className="grid gap-4 p-4 lg:grid-cols-2">
+            <label className="lg:col-span-2">
+              <span className="field-label">邮箱服务商</span>
+              <select
+                value={matchedSmtpKey}
+                onChange={(event) => applySmtpPreset(event.target.value)}
+                className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
+              >
+                {SMTP_PRESETS.map((preset) => (
+                  <option key={preset.key} value={preset.key}>{preset.label}</option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs text-gray-500">
+                选一个常用邮箱会自动填好服务器和端口；不在列表里的选「自定义」手动填。
+              </span>
+            </label>
+
             <label>
               <span className="field-label">SMTP 服务器</span>
               <input
@@ -756,9 +802,6 @@ const Settings: React.FC = () => {
                 placeholder="smtp.qq.com"
                 className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
               />
-              <span className="mt-1 block text-xs text-gray-500">
-                常用：QQ 邮箱 smtp.qq.com、163 邮箱 smtp.163.com、企业微信邮箱 smtp.exmail.qq.com。
-              </span>
             </label>
 
             <label>
