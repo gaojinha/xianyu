@@ -636,66 +636,12 @@ const Settings: React.FC = () => {
             icon={Sparkles}
           />
           <div className="grid gap-4 p-4 lg:grid-cols-2">
-            <label>
-              <span className="field-label">API 地址</span>
-              <input
-                type="text"
-                value={settings.ai_api_url || 'https://dashscope.aliyuncs.com/compatible-mode/v1'}
-                onChange={(event) => setSettings({ ...settings, ai_api_url: event.target.value })}
-                className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
-                placeholder="https://api.openai.com/v1"
-              />
-              <span className="mt-1 block text-xs text-gray-500">
-                填写兼容 OpenAI 协议的服务根地址，无需补全 `/chat/completions`。
-              </span>
-              <span className="mt-1 flex items-center gap-1 text-xs text-gray-500">
-                AI 不够用？
-                <a
-                  href="https://corleom.com/"
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="inline-flex items-center gap-1 font-semibold text-[var(--brand-text)] hover:underline"
-                >
-                  跳转到我的中转站
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-              </span>
-            </label>
-
-            <label>
-              <span className="field-label">API Key</span>
-              <div className="relative">
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={settings.ai_api_key || ''}
-                  onChange={(event) => setSettings({ ...settings, ai_api_key: event.target.value })}
-                  className="ios-input w-full rounded-md px-3 py-2.5 pr-11 font-mono text-sm"
-                  placeholder="sk-..."
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-                  aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}
-                >
-                  {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-            </label>
-
-            <label>
-              <span className="field-label">默认模型</span>
-              <select
-                value={settings.ai_model || 'qwen-plus'}
-                onChange={(event) => setSettings({ ...settings, ai_model: event.target.value })}
-                className="ios-input w-full rounded-md px-3 py-2.5"
-              >
-                <option value="qwen-plus">通义千问 Plus</option>
-                <option value="qwen-turbo">通义千问 Turbo</option>
-                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-                <option value="gpt-4">GPT-4</option>
-              </select>
-            </label>
+            <div className="lg:col-span-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+              <p className="font-semibold text-gray-800">默认由二狗大脑（本机）提供</p>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                无需在这里配置模型或密钥。账号未单独设置时，AI 回复自动走本机大脑；连不上时回落默认回复。
+              </p>
+            </div>
 
             <label className="lg:col-span-2">
               <span className="field-label">默认自动回复内容</span>
@@ -706,13 +652,6 @@ const Settings: React.FC = () => {
                 placeholder="设置默认的自动回复内容..."
               />
             </label>
-
-            <div className="lg:col-span-2">
-              <NoticeBanner
-                type="info"
-                message="常用兼容服务包括阿里云 DashScope 和 OpenAI。API Key 仅保存在当前系统配置中。"
-              />
-            </div>
           </div>
         </section>
       )}

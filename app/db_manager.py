@@ -2886,27 +2886,15 @@ class DBManager:
 
                 result = cursor.fetchone()
                 
-                # 获取系统级别的AI设置作为默认值
-                system_api_key = self.get_system_setting('ai_api_key') or ''
-                system_base_url = self.get_system_setting('ai_api_url') or DEFAULT_BASE_URL
-                system_model = self.get_system_setting('ai_model') or DEFAULT_MODEL
-                
+                # 不再向"系统级第三方配置"兜底：账号没配 model/key 时，交给
+                # ai_reply_engine._effective_settings 回落到本机"二狗大脑"。
+                # 全局"默认 AI 配置"里也不该再出现第三方模型/密钥。
                 if result:
-                    # 账号有设置，但如果api_key/base_url/model_name为空或等于默认值，使用系统设置
-                    account_model = result[1]
-                    account_api_key = result[2]
-                    account_base_url = result[3]
-                    
-                    # 如果账号值为空或等于硬编码默认值，则使用系统设置
-                    use_model = account_model if (account_model and account_model != DEFAULT_MODEL) else system_model
-                    use_api_key = account_api_key if account_api_key else system_api_key
-                    use_base_url = account_base_url if (account_base_url and account_base_url != DEFAULT_BASE_URL) else system_base_url
-                    
                     return {
                         'ai_enabled': bool(result[0]),
-                        'model_name': use_model,
-                        'api_key': use_api_key,
-                        'base_url': use_base_url,
+                        'model_name': result[1] or DEFAULT_MODEL,
+                        'api_key': result[2] or '',
+                        'base_url': result[3] or DEFAULT_BASE_URL,
                         'user_agent': result[4] or '',
                         'max_discount_percent': result[5],
                         'max_discount_amount': result[6],
@@ -2917,12 +2905,11 @@ class DBManager:
                         'custom_prompts': result[11]
                     }
                 else:
-                    # 账号没有设置，使用系统设置作为默认值
                     return {
                         'ai_enabled': False,
-                        'model_name': system_model,
-                        'api_key': system_api_key,
-                        'base_url': system_base_url,
+                        'model_name': DEFAULT_MODEL,
+                        'api_key': '',
+                        'base_url': DEFAULT_BASE_URL,
                         'user_agent': '',
                         'max_discount_percent': 10,
                         'max_discount_amount': 100,
