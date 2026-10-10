@@ -3066,11 +3066,10 @@ class XianyuLive:
             
             # 检查是否配置了用户名和密码
             if not username or not password:
-                logger.warning(f"【{self.cookie_id}】未配置用户名或密码，跳过密码登录刷新")
-                await self.send_token_refresh_notification(
-                    f"检测到{trigger_reason}，但未配置用户名或密码，无法自动刷新Cookie",
-                    "no_credentials"
-                )
+                # 未配置密码是"已知配置"而非故障：不少用户就是靠扫码登录、不配密码。
+                # 这里不直接发通知 —— 否则连接短暂波动（实测会自愈）也会虚报一次。
+                # 真要人工介入时（登录态确已失效），走重新扫码路径另行通知。
+                logger.warning(f"【{self.cookie_id}】未配置用户名或密码，跳过密码登录刷新（交由重连/扫码恢复）")
                 return False
             
             # 使用集成的 Playwright 登录方法（无需猴子补丁）
@@ -7937,11 +7936,21 @@ class XianyuLive:
                                 logger.info(f"【{self.cookie_id}】✅ 密码登录刷新成功，Cookie已更新")
                             else:
                                 logger.warning(f"【{self.cookie_id}】⚠️ 密码登录刷新失败，Cookie可能仍然无效")
-                                # 发送通知
-                                await self.send_token_refresh_notification(
-                                    f"Cookie验证失败且密码登录刷新也失败\n验证详情: {validation_result['details']}",
-                                    "cookie_validation_failed"
-                                )
+                                # 宽限：这类失败常是"令牌过期"的短暂波动，重连后往往自愈
+                                # （实测 1 分钟内恢复）。等 90 秒复验一次，仍失败才通知，避免虚报。
+                                await asyncio.sleep(90)
+                                try:
+                                    recheck = await self._verify_cookie_validity()
+                                    still_bad = not recheck.get('valid')
+                                except Exception:
+                                    still_bad = True
+                                if still_bad:
+                                    await self.send_token_refresh_notification(
+                                        f"Cookie验证失败且密码登录刷新也失败\n验证详情: {validation_result['details']}",
+                                        "cookie_validation_failed"
+                                    )
+                                else:
+                                    logger.info(f"【{self.cookie_id}】宽限期内已自愈，取消本次失效通知")
                         else:
                             logger.info(f"【{self.cookie_id}】✅ Cookie验证通过: {validation_result['details']}")
                             
