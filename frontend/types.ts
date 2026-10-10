@@ -576,6 +576,10 @@ export interface SystemSettings {
   announcement_show_notice?: boolean;
   announcement_show_update?: boolean;
   smtp_server?: string;
+  // 勿扰时段：dnd_enabled 为 'true' 时，该时段内不自动回复，消息留人工
+  dnd_enabled?: string | boolean;
+  dnd_start?: string;
+  dnd_end?: string;
   [key: string]: any;
 }
 

@@ -9567,6 +9567,35 @@ class XianyuLive:
                 return kw
         return None
 
+    @staticmethod
+    def _in_dnd_window() -> bool:
+        """当前是否处于"勿扰时段"（dnd_enabled/dnd_start/dnd_end 系统设置）。
+
+        该时段内不自动回复，消息留给人处理。支持跨夜（如 22:00–08:00）。
+        """
+        try:
+            from app.db_manager import db_manager
+            if str(db_manager.get_system_setting('dnd_enabled') or 'false').strip().lower() != 'true':
+                return False
+            start = str(db_manager.get_system_setting('dnd_start') or '22:00').strip()
+            end = str(db_manager.get_system_setting('dnd_end') or '08:00').strip()
+
+            def _to_minutes(value: str) -> int:
+                hour, minute = (value.split(':') + ['0'])[:2]
+                return int(hour) * 60 + int(minute)
+
+            start_min, end_min = _to_minutes(start), _to_minutes(end)
+            if start_min == end_min:
+                return False
+            now = time.localtime()
+            cur = now.tm_hour * 60 + now.tm_min
+            if start_min < end_min:
+                return start_min <= cur < end_min
+            return cur >= start_min or cur < end_min  # 跨夜
+        except Exception as e:
+            logger.debug(f"勿扰时段判断失败: {e}")
+            return False
+
     async def _process_chat_message_reply(self, message_data: dict, websocket, send_user_name: str,
                                          send_user_id: str, send_message: str, item_id: str,
                                          chat_id: str, msg_time: str):
@@ -9643,6 +9672,19 @@ class XianyuLive:
                 logger.warning(
                     f"[{msg_time}] 【{self.cookie_id}】命中风险词「{risk}」，转人工处理，不自动回复"
                 )
+                return
+
+            # 勿扰时段：不自动回复，消息留给人
+            if self._in_dnd_window():
+                self._add_reply_decision_log(
+                    message_data,
+                    **log_context,
+                    process_status="skipped",
+                    decision_reason="do_not_disturb",
+                    reply_strategy="none",
+                    send_status="unknown",
+                )
+                logger.info(f"[{msg_time}] 【{self.cookie_id}】处于勿扰时段，跳过自动回复")
                 return
 
             # 自动回复消息

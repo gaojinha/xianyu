@@ -652,6 +652,41 @@ const Settings: React.FC = () => {
                 placeholder="设置默认的自动回复内容..."
               />
             </label>
+
+            <label className="flex items-center justify-between gap-4 lg:col-span-2">
+              <span>
+                <span className="field-label">勿扰时段</span>
+                <span className="mt-1 block text-xs text-gray-500">
+                  开启后，该时段内不自动回复买家（消息留给你人工处理）。支持跨夜，如 22:00–08:00。
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={toBool(settings.dnd_enabled, false)}
+                onChange={(event) => setSettings({ ...settings, dnd_enabled: event.target.checked })}
+                className="h-5 w-5 shrink-0 accent-yellow-400"
+              />
+            </label>
+
+            <label>
+              <span className="field-label">勿扰开始时间</span>
+              <input
+                type="time"
+                value={settings.dnd_start || '22:00'}
+                onChange={(event) => setSettings({ ...settings, dnd_start: event.target.value })}
+                className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
+              />
+            </label>
+
+            <label>
+              <span className="field-label">勿扰结束时间</span>
+              <input
+                type="time"
+                value={settings.dnd_end || '08:00'}
+                onChange={(event) => setSettings({ ...settings, dnd_end: event.target.value })}
+                className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
+              />
+            </label>
           </div>
         </section>
       )}

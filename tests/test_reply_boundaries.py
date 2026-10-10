@@ -5,7 +5,9 @@
 """
 
 import unittest
+from unittest import mock
 
+import app.db_manager as dbm
 from app.ai_reply_engine import AIReplyEngine
 from XianyuAutoAsync import XianyuLive
 
@@ -34,6 +36,29 @@ class ManualRiskDetectionTests(unittest.TestCase):
     def test_normal_messages_pass(self):
         for msg in ["这个还在吗", "能便宜点不", "什么时候发货", "支持退货吗"]:
             self.assertIsNone(XianyuLive._detect_manual_risk(msg), msg)
+
+
+class DndWindowTests(unittest.TestCase):
+    def _check(self, enabled, start, end, hour, minute):
+        settings = {'dnd_enabled': enabled, 'dnd_start': start, 'dnd_end': end}
+        fake = __import__('time').struct_time((2026, 1, 1, hour, minute, 0, 0, 0, 0))
+        with mock.patch.object(dbm.db_manager, 'get_system_setting',
+                               side_effect=lambda k, d=None: settings.get(k)), \
+             mock.patch('XianyuAutoAsync.time.localtime', return_value=fake):
+            return XianyuLive._in_dnd_window()
+
+    def test_disabled(self):
+        self.assertFalse(self._check('false', '22:00', '08:00', 23, 0))
+
+    def test_overnight_window(self):
+        # 跨夜：22:00–08:00
+        self.assertTrue(self._check('true', '22:00', '08:00', 23, 30))
+        self.assertTrue(self._check('true', '22:00', '08:00', 7, 0))
+        self.assertFalse(self._check('true', '22:00', '08:00', 12, 0))
+
+    def test_same_day_window(self):
+        self.assertTrue(self._check('true', '13:00', '14:00', 13, 30))
+        self.assertFalse(self._check('true', '13:00', '14:00', 15, 0))
 
 
 if __name__ == "__main__":
