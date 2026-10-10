@@ -729,8 +729,11 @@ const Settings: React.FC = () => {
                 className="ios-input min-h-28 w-full resize-y rounded-md px-3 py-2.5 text-sm"
                 value={settings.default_reply || ''}
                 onChange={(event) => setSettings({ ...settings, default_reply: event.target.value })}
-                placeholder="设置默认的自动回复内容..."
+                placeholder="例如：你好，消息收到啦，看到后马上回您～"
               />
+              <span className="mt-1 block text-xs text-gray-500">
+                账号没单独设置默认回复时，用这条兜底（关键词和 AI 都没命中时发）。
+              </span>
             </label>
 
             <label className="flex items-center justify-between gap-4 lg:col-span-2">

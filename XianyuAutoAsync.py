@@ -4466,6 +4466,20 @@ class XianyuLive:
             default_reply_settings = db_manager.get_default_reply(self.cookie_id)
 
             if not default_reply_settings or not default_reply_settings.get('enabled', False):
+                # 账号没启用默认回复时，回落到系统设置里的全局"默认自动回复内容"，
+                # 让这条全局兜底真正生效（此前该设置项只是摆设，没人读它）。
+                system_fallback = (db_manager.get_system_setting('default_reply') or '').strip()
+                if system_fallback:
+                    try:
+                        formatted = system_fallback.format(
+                            send_user_name=send_user_name,
+                            send_user_id=send_user_id,
+                            send_message=send_message,
+                        )
+                    except Exception:
+                        formatted = system_fallback
+                    logger.info(f"【{self.cookie_id}】账号未配默认回复，使用系统级默认回复兜底")
+                    return {'text': formatted, 'image_url': None}
                 logger.warning(f"账号 {self.cookie_id} 未启用默认回复")
                 return None
 
