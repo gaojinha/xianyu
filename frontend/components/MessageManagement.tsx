@@ -40,7 +40,7 @@ import {
   getMessageFilters,
   getQuickPhrases,
   sendChatMessage,
-  useQuickPhrase,
+  recordQuickPhraseUse,
   toggleMessageFilter,
 } from '../services/api';
 import { confirmAction, notify } from '../services/feedback';
@@ -449,7 +449,7 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
   const insertPhrase = (phrase: QuickPhrase) => {
     setDraft(current => (current ? `${current}${phrase.content}` : phrase.content));
     setShowPhrases(false);
-    void useQuickPhrase(phrase.id).catch(() => undefined);
+    void recordQuickPhraseUse(phrase.id).catch(() => undefined);
   };
 
   const sendMessage = async () => {

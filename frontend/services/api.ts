@@ -313,7 +313,7 @@ export const deleteQuickPhrase = async (id: number): Promise<any> => {
   return del(`/quick-phrases/${id}`);
 };
 
-export const useQuickPhrase = async (id: number): Promise<any> => {
+export const recordQuickPhraseUse = async (id: number): Promise<any> => {
   return post(`/quick-phrases/${id}/use`);
 };
 

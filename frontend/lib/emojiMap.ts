@@ -34,5 +34,5 @@ const EMOJI_MAP: Record<string, string> = {
 
 // 把文本里的 [表情码] 替换成 emoji；未收录的方括号片段原样保留
 export function renderRichText(text: string): string {
-  return text.replace(/\[([^\[\]]{1,8})\]/g, (raw, word: string) => EMOJI_MAP[word] ?? raw);
+  return text.replace(/\[([^[\]]{1,8})\]/g, (raw, word: string) => EMOJI_MAP[word] ?? raw);
 }

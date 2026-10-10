@@ -652,7 +652,7 @@ const ItemList: React.FC = () => {
     field: 'multi_quantity_delivery',
   ) => {
     const key = itemKey(item);
-    const enabled = !Boolean(item[field]);
+    const enabled = !item[field];
     setSavingKey(key);
     try {
       await updateItemMultiQuantity(item.cookie_id, item.item_id, enabled);

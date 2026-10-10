@@ -22,7 +22,7 @@ const ThemeToggle: React.FC<ThemeToggleProps> = ({ compact = false, className = 
   const { theme, resolvedTheme, setTheme } = useTheme();
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
-    let nextIndex = index;
+    let nextIndex: number;
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
       nextIndex = (index + 1) % themeOptions.length;
     } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
