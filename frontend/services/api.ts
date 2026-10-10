@@ -929,6 +929,8 @@ export interface EmailTestPayload {
     smtp_user: string;
     smtp_password: string;
     smtp_from: string;
+    smtp_use_tls?: boolean;
+    smtp_use_ssl?: boolean;
 }
 
 export const sendTestEmail = async (payload: EmailTestPayload): Promise<{ success: boolean; message: string }> => {

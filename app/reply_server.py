@@ -1818,6 +1818,8 @@ class EmailTestIn(BaseModel):
     smtp_user: str = ''
     smtp_password: str = ''
     smtp_from: str = ''
+    smtp_use_tls: Optional[bool] = None
+    smtp_use_ssl: Optional[bool] = None
 
 
 class SystemSettingCreateIn(BaseModel):
@@ -4014,9 +4016,16 @@ async def send_email_test(data: EmailTestIn, _: Dict[str, Any] = Depends(require
         return {'success': False, 'message': '请输入正确的收件邮箱地址'}
     if not (data.smtp_server.strip() and data.smtp_port and data.smtp_user.strip() and data.smtp_password.strip()):
         return {'success': False, 'message': '请先完整填写 SMTP 服务器、端口、发件邮箱和授权码'}
-    # TLS/SSL 开关不在表单里，沿用库中已保存的值（默认 TLS 开、SSL 关）
-    smtp_use_tls = (db_manager.get_system_setting('smtp_use_tls') or 'true').lower() == 'true'
-    smtp_use_ssl = (db_manager.get_system_setting('smtp_use_ssl') or 'false').lower() == 'true'
+    # TLS/SSL 开关优先用表单当前值：避免"改了服务商但没保存"时，按旧配置的
+    # 加密方式去连新端口（如 465 却不开 SSL），表现为"无法连接到发件服务器"。
+    if data.smtp_use_tls is None:
+        smtp_use_tls = (db_manager.get_system_setting('smtp_use_tls') or 'true').lower() == 'true'
+    else:
+        smtp_use_tls = bool(data.smtp_use_tls)
+    if data.smtp_use_ssl is None:
+        smtp_use_ssl = (db_manager.get_system_setting('smtp_use_ssl') or 'false').lower() == 'true'
+    else:
+        smtp_use_ssl = bool(data.smtp_use_ssl)
     smtp_from = data.smtp_from.strip() or data.smtp_user.strip()
     try:
         ok, message = await db_manager.send_test_email(

@@ -263,6 +263,8 @@ const Settings: React.FC = () => {
         smtp_user: settings.smtp_user || '',
         smtp_password: settings.smtp_password || '',
         smtp_from: settings.smtp_from || '',
+        smtp_use_tls: toBool(settings.smtp_use_tls, true),
+        smtp_use_ssl: toBool(settings.smtp_use_ssl, false),
       });
       notify(res.message || (res.success ? '测试邮件已发送' : '发送失败'), res.success ? 'success' : 'error');
     } catch (error) {
