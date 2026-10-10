@@ -89,8 +89,7 @@ docker compose -f docker-compose.nas.yml up -d --build
 本地构建：
 
 ```bash
-# 从你配置的本项目远程获取更新；不要直接将上游分支合并到工作副本。
-# 当前新项目尚未配置独立托管远程。
+# 从本项目远程获取更新；不要直接将上游分支合并到工作副本。
 docker compose up -d --build
 ```
 

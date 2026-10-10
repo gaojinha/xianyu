@@ -27,9 +27,15 @@
 
 ## 验证记录与限制
 
-此前已通过前端 `npm run build`、Python `compileall`、标准及 NAS Compose 配置检查，以及 `git diff --check`。本轮复核中两种 Compose 配置及 `git diff --check` 也通过。
+本轮在本地虚拟环境安装 `requirements.txt` 依赖，并安装 Playwright Chromium 后完成以下检查：
 
-后端 `unittest` 未能完整通过：当前环境缺少 `aiohttp`、`fastapi`、`httpx`、`loguru` 和 `playwright` 等依赖，测试导入时报错；这不是已确认的代码测试通过。按项目依赖文件准备环境后应重跑后端测试。前端完整 `vitest`、lint、类型检查是否可运行，需在依赖安装状态确认后另行验证。
+- 后端 `unittest discover -s tests -p "test_*.py" -v`：374 项通过。
+- Python `compileall`：通过。
+- 前端 TypeScript `tsc --noEmit` 与 `npm run build`：通过。
+- 标准和 NAS Compose 配置检查：通过；使用临时 `ADMIN_PASSWORD` 满足必填插值，没有写入 `.env`。
+- `git diff --check`：通过。
+
+前端当前没有声明 Vitest、lint 脚本；这些检查尚未配置，不能视为已通过。上述检查不替代真实部署和账号功能验证。
 
 ## 后续建议
 

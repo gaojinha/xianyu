@@ -130,7 +130,7 @@ python Start.py
 docker compose up -d --build
 ```
 
-> 当前工作副本尚未配置独立托管远程；不要直接将 `upstream` 分支合并进来。部署失败排查、使用流程和数据安全说明见 [docs/deployment.md](docs/deployment.md)。
+> 本项目远程与上游仓库分开维护；获取项目更新时使用本项目仓库，不要直接将 `upstream` 分支合并进来。部署失败排查、使用流程和数据安全说明见 [docs/deployment.md](docs/deployment.md)。
 
 ## 许可与声明
 
