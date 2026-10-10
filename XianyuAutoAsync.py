@@ -9547,6 +9547,26 @@ class XianyuLive:
             logger.warning(f"【{self.cookie_id}】判断商品归属失败: {self._safe_str(e)}")
             return False
 
+    # 命中即"不自动回、转人工"的风险消息特征：投诉维权、要求私下交易、
+    # 辱骂威胁等。这类消息让 AI 接只会添乱，必须交给人处理。
+    _MANUAL_RISK_KEYWORDS = (
+        '投诉', '举报', '12315', '工商', '消协', '消费者协会', '起诉', '曝光',
+        '报警', '法院', '律师', '骗子', '骗人', '假货', '卖假',
+        '加微信', '加我微信', '微信多少', '留个微信', '私下', '电话多少',
+        '手机号', 'qq号',
+    )
+
+    @classmethod
+    def _detect_manual_risk(cls, message):
+        """命中返回命中的词，否则 None。"""
+        text = str(message or '').strip().lower()
+        if not text:
+            return None
+        for kw in cls._MANUAL_RISK_KEYWORDS:
+            if kw.lower() in text:
+                return kw
+        return None
+
     async def _process_chat_message_reply(self, message_data: dict, websocket, send_user_name: str,
                                          send_user_id: str, send_message: str, item_id: str,
                                          chat_id: str, msg_time: str):
@@ -9606,6 +9626,22 @@ class XianyuLive:
                 )
                 logger.info(
                     f"[{msg_time}] 【{self.cookie_id}】商品 {item_id} 非本店，判定为买家咨询，跳过自动回复"
+                )
+                return
+
+            # 风险消息转人工：投诉维权、要求私下交易、辱骂威胁等，AI 不接。
+            risk = self._detect_manual_risk(send_message)
+            if risk:
+                self._add_reply_decision_log(
+                    message_data,
+                    **log_context,
+                    process_status="skipped",
+                    decision_reason=f"risk_manual:{risk}",
+                    reply_strategy="none",
+                    send_status="unknown",
+                )
+                logger.warning(
+                    f"[{msg_time}] 【{self.cookie_id}】命中风险词「{risk}」，转人工处理，不自动回复"
                 )
                 return
 
