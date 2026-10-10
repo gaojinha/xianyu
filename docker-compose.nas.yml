@@ -1,27 +1,24 @@
-# 闲鱼智控 —— NAS / 低配设备专用部署配置（零构建）
+# 闲鱼卖家工作台 —— NAS 部署配置
 #
 # 适用于飞牛 fnOS、群晖、威联通、软路由等设备。
 #
-# 与 docker-compose.yml 的区别，也是这个文件存在的原因：
-#   1. 不在本机构建镜像，直接拉预构建镜像。NAS 上跑 npm ci + vite build +
-#      pip 编译 + 下载 Chromium 会让 CPU 长时间 100%，内存不够时 OOM，
-#      表现就是"部署不上、机器卡死"。
-#   2. 不依赖 .env 文件。NAS 的 Docker 图形界面里通常只能贴 compose 内容，
-#      没有地方放 .env，原配置的 ${ADMIN_PASSWORD:?...} 会直接让部署中断。
-#   3. 内存上限给到 3G。Chromium 冷启动峰值就要 300~500M，2G 容易被 OOM
-#      杀掉，配合 restart 策略会变成反复重启、CPU 一直满。
+# 使用本项目 Dockerfile-cn 从源码构建，不拉取上游预构建镜像。
+# 构建需要额外 CPU、内存和磁盘空间；低配设备可在其他机器构建后分发镜像。
 #
-# 使用前请注意：默认账号是 admin / admin123，登录后立刻改密码。
+# 使用前请在 .env 或容器环境中设置非空的强 ADMIN_PASSWORD。
 #
 # 启动：docker compose -f docker-compose.nas.yml up -d
 
 services:
   xianyu-app:
-    image: ghcr.io/23star/xianyu-super-butler:latest
-    container_name: xianyu-super-butler
+    build:
+      context: .
+      dockerfile: Dockerfile-cn
+    image: xianyu-seller-console:latest
+    container_name: xianyu-seller-console
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${WEB_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data:rw
       - ./logs:/app/logs:rw
@@ -31,10 +28,10 @@ services:
       DB_PATH: /app/data/xianyu_data.db
       LOG_LEVEL: INFO
 
-      # 默认账号 admin / admin123，登录后请在「设置 → 账号与同步 → 修改登录密码」改掉。
+      # 替换为你自己的强密码。
       # 只在首次创建数据库时生效；数据库已存在时改这里不会改密码。
       ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: admin123
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env or the container environment}"
 
       AUTO_REPLY_ENABLED: "true"
       AUTO_DELIVERY_ENABLED: "true"

@@ -281,9 +281,9 @@ const App: React.FC = () => {
                 <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/70 backdrop-blur">
                   <span className="text-2xl font-black text-[#2a2416]">闲</span>
                 </div>
-                <p className="mt-7 text-xs font-bold tracking-widest text-[#8a6300]">XIANYU SUPER BUTLER</p>
+                <p className="mt-7 text-xs font-bold tracking-widest text-[#8a6300]">XIANYU SELLER CONSOLE</p>
                 <h1 className="mt-2 max-w-md text-3xl font-extrabold leading-tight text-[#2a2416]">
-                  闲鱼超级管家
+                  闲鱼卖家工作台
                 </h1>
                 <p className="mt-4 max-w-md text-sm leading-7 text-[#6b5200]">
                   统一处理账号、商品、订单、消息、回复和自动发货。
@@ -518,7 +518,7 @@ const App: React.FC = () => {
                 )}
 
                 <p className="mt-7 border-t border-gray-100 pt-5 text-xs font-medium text-gray-400">
-                  闲鱼超级管家 · xy.corleom.com
+                  闲鱼卖家工作台 · 本地部署
                 </p>
               </div>
             </div>
@@ -559,8 +559,8 @@ const App: React.FC = () => {
             <Menu className="w-5 h-5" />
           </button>
           <div className="min-w-0">
-            <p className="truncate text-sm font-bold">{pageLabels[activeTab] || '闲鱼超级管家'}</p>
-            <p className="text-[11px] text-gray-400">闲鱼超级管家</p>
+            <p className="truncate text-sm font-bold">{pageLabels[activeTab] || '闲鱼卖家工作台'}</p>
+            <p className="text-[11px] text-gray-400">闲鱼卖家工作台</p>
           </div>
           <ThemeToggle compact className="ml-auto" />
         </header>

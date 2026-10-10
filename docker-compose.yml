@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: xianyu-super-butler:latest
-    container_name: xianyu-super-butler
+    image: xianyu-seller-console:latest
+    container_name: xianyu-seller-console
     restart: unless-stopped
     user: "0:0"
     ports:
@@ -25,7 +25,7 @@ services:
       SQL_LOG_ENABLED: "${SQL_LOG_ENABLED:-true}"
       SQL_LOG_LEVEL: "${SQL_LOG_LEVEL:-INFO}"
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin123}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env before starting}"
       SESSION_TIMEOUT: "${SESSION_TIMEOUT:-3600}"
       MULTIUSER_ENABLED: "${MULTIUSER_ENABLED:-true}"
       USER_REGISTRATION_ENABLED: "${USER_REGISTRATION_ENABLED:-true}"
@@ -67,7 +67,7 @@ services:
 
   nginx:
     image: nginx:alpine
-    container_name: xianyu-super-butler-nginx
+    container_name: xianyu-seller-console-nginx
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-80}:80"

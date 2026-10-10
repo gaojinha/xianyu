@@ -121,7 +121,7 @@ const About: React.FC = () => {
 
         <div className="mt-4 grid gap-3 border-t border-gray-100 pt-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-xs font-semibold text-gray-500">官网</span>
+            <span className="text-xs font-semibold text-gray-500">上游在线版</span>
             <a
               href="https://xy.corleom.com"
               target="_blank"
@@ -135,7 +135,7 @@ const About: React.FC = () => {
           </div>
 
           <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-xs font-semibold text-gray-500">QQ 交流群</span>
+            <span className="text-xs font-semibold text-gray-500">上游 QQ 社群</span>
             <a
               href={QQ_GROUP_LINK}
               className="inline-flex min-w-0 items-center gap-1.5 text-xs font-bold text-[#8c7900] hover:underline"
@@ -149,7 +149,7 @@ const About: React.FC = () => {
           </div>
 
           <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-xs font-semibold text-gray-500">开源仓库</span>
+            <span className="text-xs font-semibold text-gray-500">直接上游代码</span>
             <a
               href="https://github.com/23Star/xianyu-super-butler"
               target="_blank"
@@ -163,7 +163,7 @@ const About: React.FC = () => {
           </div>
 
           <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-xs font-semibold text-gray-500">联系邮箱</span>
+            <span className="text-xs font-semibold text-gray-500">上游联系邮箱</span>
             <a
               href="mailto:admin@corleom.com"
               className="inline-flex min-w-0 items-center gap-1.5 text-xs font-bold text-[#8c7900] hover:underline"

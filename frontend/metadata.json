@@ -1,5 +1,5 @@
 {
-  "name": "闲鱼自动发货 Pro",
-  "description": "高端商务风格的闲鱼自动发货管理后台，支持多账号管理、自动发货与AI回复配置。",
+  "name": "闲鱼卖家工作台",
+  "description": "集中管理闲鱼账号、商品、订单、消息、回复与发货。",
   "requestFramePermissions": []
 }

@@ -101,8 +101,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, mo
             <span className="text-lg font-black text-[#2a2416]">闲</span>
           </div>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-base font-extrabold text-[var(--text)]">闲鱼超级管家</p>
-            <p className="mt-0.5 text-[11px] font-medium text-[var(--text-soft)]">运营工作台</p>
+            <p className="truncate text-base font-extrabold text-[var(--text)]">闲鱼卖家工作台</p>
+            <p className="mt-0.5 text-[11px] font-medium text-[var(--text-soft)]">Xianyu Seller Console</p>
           </div>
           <button type="button" onClick={onMobileClose} className="rounded-full p-2 hover:bg-[var(--surface-hover)] lg:hidden" aria-label="关闭导航">
             <X className="w-5 h-5" />
