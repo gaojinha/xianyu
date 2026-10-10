@@ -24,6 +24,7 @@
 - Compose 镜像与容器使用 `xianyu-seller-console` 命名；标准和 NAS 配置均要求设置非空 `ADMIN_PASSWORD`。NAS 配置从本项目 `Dockerfile-cn` 构建，不再使用上游预构建镜像。
 - `.env.example` 中管理员密码留空。密码只在首次创建数据库时生效；数据库已存在时，须在应用设置中修改。
 - [部署说明](deployment.md) 已与上述配置对齐，并说明平台人机验证应由账号所有者通过官方页面完成，不应绕过。
+- GitHub Actions CI 已新增后端测试/编译及前端类型检查/构建任务，在 `main` 推送和面向 `main` 的 PR 上运行。
 
 ## 验证记录与限制
 
@@ -39,8 +40,8 @@
 
 ## 后续建议
 
-1. 为公开仓库配置合适的分支保护和 CI 验证，并继续区分本项目 `origin` 与上游 `upstream`。
-2. 在 Python 3.11+ 环境安装项目依赖，运行 `docs/deployment.md` 中的后端验证命令；补齐缺少的前端测试、lint 和类型检查记录。
+1. 在 GitHub 仓库设置中启用 `main` 分支保护，并将 CI 的 `Backend tests`、`Frontend checks` 设为必需检查；确认自动更新统计数据的 workflow 与保护规则兼容。
+2. 继续区分本项目 `origin` 与上游 `upstream`；前端 Vitest 和 lint 尚未配置。
 3. 按 [项目蓝图](PROJECT_BLUEPRINT.md) 先审视账号隔离、写操作幂等、权限、速率限制、审计和敏感数据处理，再增加 CLI/MCP 或市场监控功能。
 4. 任何真实账号写操作先用测试账号验证；遇到平台人机验证时由账号所有者按官方流程处理。
 
