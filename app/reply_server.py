@@ -1234,9 +1234,9 @@ async def register(request: RegisterRequest):
 
 # ------------------------- 发送消息接口 -------------------------
 
-# 固定的API秘钥（生产环境中应该从配置文件或环境变量读取）
-# 注意：现在从系统设置中读取QQ回复消息秘钥
-API_SECRET_KEY = "xianyu_api_secret_2024"  # 保留作为后备
+# 发送消息接口的密钥只从系统设置读取（qq_reply_secret_key）。
+# 不再保留硬编码后备密钥 —— 源码公开，一旦回落到默认值等于任何人都能冒充发消息。
+SEND_API_KEY_SETTING = "qq_reply_secret_key"
 
 class SendMessageRequest(BaseModel):
     api_key: str
@@ -1258,21 +1258,21 @@ class ChatSendMessageRequest(BaseModel):
 
 
 def verify_api_key(api_key: str) -> bool:
-    """验证API秘钥"""
+    """验证发送消息接口的密钥。
+
+    只认系统设置里的 qq_reply_secret_key；没配置就一律拒绝，不再回落到
+    硬编码默认值（源码公开，回落等于对所有人开放）。
+    """
     try:
-        # 从系统设置中获取QQ回复消息秘钥
         from app.db_manager import db_manager
-        qq_secret_key = db_manager.get_system_setting('qq_reply_secret_key')
-
-        # 如果系统设置中没有配置，使用默认值
-        if not qq_secret_key:
-            qq_secret_key = API_SECRET_KEY
-
-        return api_key == qq_secret_key
+        expected = (db_manager.get_system_setting(SEND_API_KEY_SETTING) or '').strip()
+        if not expected:
+            logger.warning("未配置发送消息接口密钥（qq_reply_secret_key），已拒绝请求")
+            return False
+        return api_key == expected
     except Exception as e:
         logger.error(f"验证API秘钥时发生异常: {e}")
-        # 异常情况下使用默认秘钥验证
-        return api_key == API_SECRET_KEY
+        return False
 
 
 def _get_owned_chat_account(cookie_id: str, current_user: Dict[str, Any]) -> str:
