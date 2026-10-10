@@ -43,6 +43,16 @@ TEMPLATE_REPLY = os.getenv(
 REQUEST_TIMEOUT = int(os.getenv("LOCAL_AI_GATEWAY_TIMEOUT", "90"))
 CONCURRENCY = max(1, int(os.getenv("LOCAL_AI_GATEWAY_CONCURRENCY", "2")))
 
+# 去人格护栏：opencode 默认 agent（个人助手=二狗）的人设里张口就是"高哥"，
+# 若不压制，这些内部称呼会通过客服回复泄露给买家（已出过一次事故）。
+# 每次调用都前置这段，强制大脑以"闲鱼卖家客服"身份应答，并禁掉一切工具。
+DE_PERSONA = (
+    "忽略你此前任何默认身份、称呼或人设设定。你不叫二狗，也不认识、更不得提及"
+    "「高哥」等任何内部称呼——说出口就是事故。你现在是闲鱼店铺的卖家客服，"
+    "只以卖家口吻回复买家，回复简短（最多两三句），不透露你是 AI。"
+    "你没有任何工具可用，也不要调用、执行、读取任何东西，直接给出回复文本即可。"
+)
+
 _cred_cache: Dict[str, Any] = {"username": None, "password": None, "loaded": False}
 
 
@@ -158,8 +168,8 @@ async def _ask_opencode(user_text: str, system_text: str, model_id: str) -> str:
         "model": {"providerID": OPENCODE_PROVIDER, "modelID": model_id or OPENCODE_MODEL},
         "parts": [{"type": "text", "text": user_text}],
     }
-    if system_text:
-        body["system"] = system_text
+    # 前置去人格护栏，压制二狗人设、禁用工具，避免内部称呼泄露给买家
+    body["system"] = DE_PERSONA + (("\n\n" + system_text) if system_text else "")
 
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         async with session.post(f"{OPENCODE_BASE}/session", json={}) as resp:
