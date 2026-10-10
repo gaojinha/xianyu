@@ -2318,6 +2318,45 @@ class XianyuLive:
                         except Exception as log_e:
                             logger.error(f"【{self.cookie_id}】记录风控日志失败: {log_e}")
 
+                        # 默认不自动解滑块：实测服务端即便把滑块拖到目标位置，闲鱼仍判
+                        # 失败（拦的是行为特征，CDP 派发的事件密度不够），自动重试只会
+                        # 持续加重风控。直接熔断并转人工 —— 把唯一有效的恢复路径（页面内
+                        # 人工验证 / 扫码重扫）交给用户。想恢复旧行为可设 AUTO_SLIDER_SOLVE=true。
+                        if not self._auto_slider_solve_enabled():
+                            logger.warning(
+                                f"【{self.cookie_id}】闲鱼要求滑块验证，已跳过自动验证，转人工处理"
+                            )
+                            if 'log_id' in locals() and log_id:
+                                try:
+                                    from app.db_manager import db_manager
+                                    db_manager.update_risk_control_log(
+                                        log_id=log_id,
+                                        processing_result="需人工处理，已跳过自动滑块验证",
+                                        processing_status='failed',
+                                    )
+                                except Exception as update_e:
+                                    logger.error(f"【{self.cookie_id}】更新风控日志失败: {update_e}")
+                            risk_control.registry.get(self.cookie_id).trip(
+                                "滑块需人工处理，自动验证已跳过"
+                            )
+                            self.last_token_refresh_status = "captcha_manual_required"
+                            notification_sent = True
+                            try:
+                                await self.send_token_refresh_notification(
+                                    "闲鱼要求滑块验证，系统已跳过自动验证，需要人工处理\n\n"
+                                    "处理方式（任选其一）：\n"
+                                    "1. 在账号管理页点「人工验证」，在页面内拖动滑块完成\n"
+                                    "2. 点「扫码添加账号」，用同一个闲鱼账号重新扫码\n\n"
+                                    "系统已暂停该账号的自动请求，避免风控加重。",
+                                    "captcha_manual_required",
+                                )
+                            except Exception as notify_error:
+                                logger.warning(
+                                    f"【{self.cookie_id}】发送人工处理通知失败: "
+                                    f"{self._safe_str(notify_error)}"
+                                )
+                            return None
+
                         try:
                             # 尝试通过滑块验证获取新的cookies
                             captcha_start_time = time.time()
@@ -2523,6 +2562,16 @@ class XianyuLive:
             else:
                 logger.info(f"【{self.cookie_id}】已发送滑块验证相关通知，跳过Token刷新异常通知")
             return None
+
+    @staticmethod
+    def _auto_slider_solve_enabled() -> bool:
+        """是否允许后台自动拖动滑块。
+
+        默认关闭。实测服务端即使把滑块拖到目标位置，闲鱼仍判失败 —— 拦的是
+        行为特征（CDP 派发的事件密度不够），自动重试不会成功，只会持续加重风控。
+        默认转人工处理；想恢复旧行为可设环境变量 AUTO_SLIDER_SOLVE=true。
+        """
+        return os.getenv('AUTO_SLIDER_SOLVE', 'false').strip().lower() == 'true'
 
     def _need_captcha_verification(self, res_json: dict) -> bool:
         """检查响应是否需要滑块验证"""

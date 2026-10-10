@@ -573,8 +573,10 @@ const AccountList: React.FC = () => {
               </>
             ) : (
               <>
-                {' '}本地冷却已结束，但闲鱼仍要求完成验证。请用下方账号卡片里的
-                「在我的浏览器打开验证页」用真实鼠标过一次滑块，通过后会自动恢复。
+                {' '}本地冷却已结束，但闲鱼仍要求完成验证。滑块验证请点下方账号卡片里的
+                「人工验证」在页面内拖过滑块 —— 通过后系统会自动取回并保存新 Cookie；
+                人脸或扫码类请点右上角「扫码添加账号」重新扫码。外部验证页只适合排查，
+                验证结果不会同步回系统。
               </>
             )}
           </p>
@@ -681,24 +683,45 @@ const AccountList: React.FC = () => {
                 {/* 闲鱼要求人机验证时给出「自己浏览器打开」的入口。
                     服务器端用 CDP 拖滑块通过率很低（风控查的是合并前子事件密度，
                     自动化派发每帧只有一个），用真实鼠标过一次要可靠得多。 */}
-                {blockedState?.verification_url && (
+                {blockedState?.verification_type === 'slider' && (
                   <div className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
                     <p className="font-bold">闲鱼要求完成人机验证，账号暂时拿不到令牌</p>
                     <p className="mt-1">
-                      推荐用你自己的浏览器打开验证页、用真实鼠标拖动滑块，通过率远高于服务器自动拖动。
-                      验证通过后本页会自动恢复，无需重新扫码。
+                      点「页面内人工验证」在弹窗里拖动滑块完成 —— 这是唯一会把验证结果和新
+                      Cookie 回写到系统的入口，通过后账号会自动恢复，无需重新扫码。
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenFreshCaptcha(account.id)}
-                      disabled={freshUrlLoadingId === account.id}
-                      className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-[#ffe100] px-3 py-1.5 font-bold text-[#2a2416] hover:bg-[#ffd700] disabled:opacity-60"
-                    >
-                      {freshUrlLoadingId === account.id
-                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        : <ShieldCheck className="h-3.5 w-3.5" />}
-                      在我的浏览器打开验证页
-                    </button>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleManualCaptcha(account)}
+                        disabled={manualCaptchaId !== null}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-[#ffe100] px-3 py-1.5 font-bold text-[#2a2416] hover:bg-[#ffd700] disabled:opacity-60"
+                      >
+                        {manualCaptchaId === account.id
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <ShieldCheck className="h-3.5 w-3.5" />}
+                        页面内人工验证
+                      </button>
+                      {blockedState.verification_url && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenFreshCaptcha(account.id)}
+                          disabled={freshUrlLoadingId === account.id}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 px-3 py-1.5 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-60"
+                          title="在外部标签页打开验证页，验证结果不会回写到系统"
+                        >
+                          {freshUrlLoadingId === account.id
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <ShieldCheck className="h-3.5 w-3.5" />}
+                          在我的浏览器打开验证页
+                        </button>
+                      )}
+                    </div>
+                    {blockedState.verification_url && (
+                      <p className="mt-1 text-[11px] text-amber-700">
+                        注：外部验证页只用于排查，滑块过掉的 Cookie 不会同步回系统。
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

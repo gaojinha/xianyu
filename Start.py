@@ -732,6 +732,37 @@ def _start_api_server():
 
 
 
+def _start_local_ai_gateway():
+    """后台线程启动本地 AI 网关（OpenAI 兼容），让项目复用本机 opencode 的模型。
+
+    只绑定 127.0.0.1：这是给本项目自己用的内部端点，不对外提供服务。
+    默认开启；可用 LOCAL_AI_GATEWAY_ENABLED=false 关闭。
+    """
+    if os.getenv('LOCAL_AI_GATEWAY_ENABLED', 'true').strip().lower() in ('0', 'false', 'no', 'off'):
+        logger.info("本地 AI 网关已通过环境变量关闭")
+        return
+
+    host = os.getenv('LOCAL_AI_GATEWAY_HOST', '127.0.0.1')
+    port = int(os.getenv('LOCAL_AI_GATEWAY_PORT', '8090'))
+    import uvicorn
+    loop = None
+    try:
+        config = uvicorn.Config("app.local_ai_gateway:app", host=host, port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        logger.info(f"启动本地 AI 网关: http://{host}:{port}/v1")
+        loop.run_until_complete(server.serve())
+    except Exception as e:
+        logger.error(f"本地 AI 网关启动失败: {e}")
+    finally:
+        if loop is not None:
+            if loop.is_running():
+                loop.stop()
+            loop.close()
+        asyncio.set_event_loop(None)
+
+
 def load_keywords_file(path: str):
     """从文件读取关键字 -> [(keyword, reply)]"""
     kw_list = []
@@ -808,6 +839,11 @@ async def main():
     print("启动 API 服务线程...")
     threading.Thread(target=_start_api_server, daemon=True).start()
     print("API 服务线程已启动")
+
+    # 启动本地 AI 网关线程（仅绑 127.0.0.1，供本项目复用本机模型）
+    print("启动本地 AI 网关线程...")
+    threading.Thread(target=_start_local_ai_gateway, daemon=True).start()
+    print("本地 AI 网关线程已启动")
 
     # 启动数据库自动备份：全局一份，不随账号数量重复
     print("启动数据库自动备份任务...")

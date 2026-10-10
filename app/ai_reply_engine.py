@@ -20,6 +20,13 @@ from loguru import logger
 from openai import OpenAI
 from app.db_manager import db_manager
 
+# 本机"大脑求助通道"。项目默认不再要求用户配置第三方模型：账号没配 api_key 时，
+# AI 回复自动求助本机二狗大脑（由 app.local_ai_gateway 在 127.0.0.1 提供）。
+# 可用环境变量覆盖；用户显式配置了第三方 key 时仍尊重其配置。
+LOCAL_BRAIN_BASE_URL = os.getenv("LOCAL_BRAIN_BASE_URL", "http://127.0.0.1:8090/v1")
+LOCAL_BRAIN_MODEL = os.getenv("LOCAL_BRAIN_MODEL", "deepseek-v4.1-flash")
+LOCAL_BRAIN_API_KEY = os.getenv("LOCAL_BRAIN_API_KEY", "local-brain")
+
 
 class ReasoningBudgetExhausted(RuntimeError):
     """推理模型把 max_tokens 全花在思维链上，没给正文留下额度。
@@ -67,13 +74,31 @@ class AIReplyEngine:
 注意：结合商品信息，给出实用建议。'''
         }
     
-    def _create_openai_client(self, cookie_id: str) -> Optional[OpenAI]:
+    @staticmethod
+    def _effective_settings(settings: dict) -> dict:
+        """决定这次调用走哪个后端。
+
+        原则：一个脑子。项目默认不再要求用户配置第三方模型 —— 账号若没有
+        自己的 api_key，就回落到本机"大脑求助通道"（由 app.local_ai_gateway
+        在 127.0.0.1 提供，背后是二狗大脑）。用户显式配了第三方 key 则尊重之。
+        """
+        if (settings.get('api_key') or '').strip() and settings.get('base_url') and settings.get('model_name'):
+            return settings
+        effective = dict(settings)
+        effective['base_url'] = LOCAL_BRAIN_BASE_URL
+        effective['model_name'] = LOCAL_BRAIN_MODEL
+        effective['api_key'] = LOCAL_BRAIN_API_KEY
+        return effective
+
+    def _create_openai_client(self, cookie_id: str, settings: Optional[dict] = None) -> Optional[OpenAI]:
         """
         (原 get_client) 创建指定账号的OpenAI客户端
         修复 P0-2: 移除了缓存逻辑，以支持多进程无状态部署
+        settings 可传入"已回落本地大脑通道"的有效配置；不传则按账号配置读取。
         """
-        settings = db_manager.get_ai_reply_settings(cookie_id)
-        if not settings['ai_enabled'] or not settings['api_key']:
+        if settings is None:
+            settings = db_manager.get_ai_reply_settings(cookie_id)
+        if not settings.get('ai_enabled') or not settings.get('api_key'):
             return None
         
         try:
@@ -286,6 +311,8 @@ class AIReplyEngine:
 
     def _dispatch_api_call(self, settings: dict, messages: list, cookie_id: str, max_tokens: int) -> Optional[str]:
         """按配置选择具体的 AI 服务并发起一次调用。"""
+        # 无第三方配置时回落到本机"大脑求助通道"，用户无需自己配模型
+        settings = self._effective_settings(settings)
         if self._is_dashscope_api(settings):
             logger.info("使用DashScope API生成回复")
             return self._call_dashscope_api(settings, messages, max_tokens=max_tokens, temperature=0.7)
@@ -296,7 +323,7 @@ class AIReplyEngine:
 
         logger.info("使用OpenAI兼容API生成回复")
         # 修复 P0-2: 调用已修改的无状态客户端创建方法
-        client = self._create_openai_client(cookie_id)
+        client = self._create_openai_client(cookie_id, settings)
         if not client:
             return None
         return self._call_openai_api(client, settings, messages, max_tokens=max_tokens, temperature=0.7)

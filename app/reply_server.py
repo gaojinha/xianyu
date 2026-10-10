@@ -6437,12 +6437,8 @@ async def test_ai_reply(cookie_id: str, test_data: dict,
         if not ai_reply_engine.is_ai_enabled(cookie_id):
             raise HTTPException(status_code=400, detail='该账号未启用AI回复')
 
-        # 检查AI设置是否完整
-        settings = db_manager.get_ai_reply_settings(cookie_id)
-        if not settings.get('api_key'):
-            raise HTTPException(status_code=400, detail='未配置API Key，请先在AI设置中配置API Key')
-        if not settings.get('base_url'):
-            raise HTTPException(status_code=400, detail='未配置API地址，请先在AI设置中配置API地址')
+        # 不再强制账号自配 key/地址：没配时 ai_reply_engine 会自动回落到本机
+        # "大脑求助通道"（二狗大脑），用户无需在界面上填模型与密钥。
 
         # 构造测试数据
         test_message = test_data.get('message', '你好')
@@ -9341,6 +9337,47 @@ def use_quick_phrase(
     return {'success': db_manager.increment_quick_phrase_usage(phrase_id)}
 
 
+def _fresh_verification_type(cookie_id: str, user_id: Any) -> str:
+    """取账号最近一次仍在有效期内的风控验证类型。
+
+    风控日志是历史记录：滑块过完、Token 已拿到之后旧事件仍留在表里，只按关键词
+    判断会让恢复正常的账号一直挂着"需要验证"。这里只取最近一条，并套用与
+    /api/risk-control/status 一致的 1 小时新鲜度（punish 链接里的 x5secdata 本身
+    也只约 1 小时有效）。返回 classify_verification_event 的类型：
+    'slider' / 'face' / 'qr' / 'risk_control' / 'none'。
+    """
+    from datetime import datetime
+
+    from app.db_manager import db_manager
+
+    try:
+        logs = db_manager.get_risk_control_logs(
+            cookie_id=cookie_id, limit=1, user_id=user_id
+        )
+    except Exception as exc:
+        logger.debug(f"【{cookie_id}】读取风控日志失败: {exc}")
+        return 'none'
+
+    latest = logs[0] if logs else None
+    if not latest:
+        return 'none'
+
+    created_at = latest.get('created_at')
+    if created_at:
+        try:
+            text = str(created_at).replace('T', ' ').split('.')[0]
+            event_time = datetime.strptime(text, '%Y-%m-%d %H:%M:%S')
+            if (datetime.now() - event_time).total_seconds() > 3600:
+                return 'none'
+        except Exception:
+            pass
+
+    detail = ' '.join(str(latest.get(key) or '') for key in (
+        'event_type', 'event_description', 'processing_result', 'error_message'
+    ))
+    return classify_verification_event(detail)[0]
+
+
 @app.post('/api/captcha/manual-session')
 async def start_manual_captcha(
     cookie_id: str = Form(...),
@@ -9364,7 +9401,13 @@ async def start_manual_captcha(
         raise HTTPException(status_code=404, detail="账号不存在或无权访问")
 
     guard = risk_control.registry.get(cookie_id)
-    if not guard.is_blocked:
+    # 本地熔断是进程内状态，最长 20 分钟就自动过期；而闲鱼侧的验证要求要真正过掉
+    # 滑块才会解除。原实现只卡本地熔断，冷却一结束用户就被拒之门外，前端只能引导
+    # 去外部标签页 —— 那里过的滑块 Cookie 留在用户浏览器里，同步不回服务端。而人工
+    # 验证会话是本项目里唯一会把验证后 Cookie 回写保存的入口，所以放宽为：本地熔断
+    # 中，或最近一小时内仍有新鲜的滑块验证事件。
+    fresh_type = _fresh_verification_type(cookie_id, current_user['user_id'])
+    if not guard.is_blocked and fresh_type != 'slider':
         raise HTTPException(
             status_code=409,
             detail="该账号当前不处于风控状态，无需人工验证",
