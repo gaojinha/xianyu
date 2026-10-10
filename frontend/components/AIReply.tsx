@@ -21,6 +21,18 @@ import { EmptyState, PageHeader, PageLoading, SectionHeader } from './ui';
 const LOCAL_BRAIN_BASE_URL = 'http://127.0.0.1:8090/v1';
 const LOCAL_BRAIN_MODEL = 'deepseek-v4.1-flash';
 
+// 回复风格预置模板，一键填入下方"回复风格与业务规则"，免得从空框开始写。
+const PRESET_PROMPTS: { label: string; text: string }[] = [
+  {
+    label: '二手数码版',
+    text: '语气实在、口语，不夸张不吹捧。成色以实拍图为准，如实描述、不夸大；库存只说"在/暂时没了"，不编数量；不承诺发货时效、正品鉴定、赔付；售后按平台政策，以订单页为准。议价在设定边界内小幅让利，不松口过快。',
+  },
+  {
+    label: '通用版',
+    text: '语气亲切简短，像真人卖家。只依据商品事实回答，拿不准就说"我确认一下再回复您"；不编造、不擅自承诺、不暴露 AI 身份。',
+  },
+];
+
 const defaultSettings: AIReplySettings = {
   ai_enabled: false,
   model_name: LOCAL_BRAIN_MODEL,
@@ -248,7 +260,21 @@ const AIReply: React.FC = () => {
                     />
                   </label>
                   <label className="sm:col-span-3">
-                    <span className="mb-1.5 block text-sm font-semibold text-gray-700">回复风格与业务规则</span>
+                    <span className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-gray-700">回复风格与业务规则</span>
+                      <span className="flex gap-1.5">
+                        {PRESET_PROMPTS.map(preset => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => updateSetting('custom_prompts', preset.text)}
+                            className="rounded-full border border-amber-300 px-2.5 py-1 text-xs font-medium text-amber-800 hover:bg-amber-50"
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </span>
+                    </span>
                     <textarea
                       value={settings.custom_prompts}
                       onChange={event => updateSetting('custom_prompts', event.target.value)}

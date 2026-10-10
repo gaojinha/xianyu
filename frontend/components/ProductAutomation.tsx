@@ -579,7 +579,7 @@ const ProductAutomation: React.FC = () => {
                 <input
                   value={filterForm.include_keywords}
                   onChange={(event) => setFilterForm({ ...filterForm, include_keywords: event.target.value })}
-                  placeholder="逗号分隔"
+                  placeholder="逗号分隔，如：iPhone,手机,平板"
                   className="ios-input mt-1.5 w-full rounded-md px-3 py-2.5 text-sm"
                 />
               </label>
@@ -588,7 +588,7 @@ const ProductAutomation: React.FC = () => {
                 <input
                   value={filterForm.exclude_keywords}
                   onChange={(event) => setFilterForm({ ...filterForm, exclude_keywords: event.target.value })}
-                  placeholder="逗号分隔"
+                  placeholder="逗号分隔，如：配件,壳,膜"
                   className="ios-input mt-1.5 w-full rounded-md px-3 py-2.5 text-sm"
                 />
               </label>
@@ -617,6 +617,7 @@ const ProductAutomation: React.FC = () => {
                 <input
                   value={filterForm.category}
                   onChange={(event) => setFilterForm({ ...filterForm, category: event.target.value })}
+                  placeholder="如：手机、电脑"
                   className="ios-input mt-1.5 w-full rounded-md px-3 py-2.5 text-sm"
                 />
               </label>

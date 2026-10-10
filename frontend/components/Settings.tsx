@@ -40,6 +40,19 @@ import {
 
 type SettingsSection = 'general' | 'ai' | 'email' | 'phrases' | 'notice';
 
+// 常用客服短语预设：一键载入、开箱即用。口径与"话术红线"一致（不承诺库存/时效/赔付）。
+const PRESET_PHRASES = [
+  { category: '通用', title: '打招呼', content: '在的亲，有什么可以帮您～' },
+  { category: '通用', title: '稍等', content: '亲稍等哈，我看一下马上回您～' },
+  { category: '通用', title: '已发货', content: '亲，已经安排发货啦，物流更新后您可以在订单页查看～' },
+  { category: '通用', title: '感谢', content: '谢谢惠顾，有问题随时找我哈～' },
+  { category: '商品', title: '成色说明', content: '成色以实拍图为准，如实描述不夸大；想看细节我给您补拍。' },
+  { category: '商品', title: '库存', content: '在的，可以直接拍～' },
+  { category: '议价', title: '实在价', content: '这个价已经很实在了，给您尽量抹个零哈～' },
+  { category: '议价', title: '不还价', content: '不好意思哈，这个价不还价了～' },
+  { category: '售后', title: '退换', content: '支持平台规定的退换政策，具体以订单页为准哈～' },
+];
+
 /**
  * 把后端的开关值转成布尔。
  *
@@ -108,6 +121,30 @@ const Settings: React.FC = () => {
   };
 
   useEffect(() => { loadPhrases(); }, []);
+
+  const [seedingPhrases, setSeedingPhrases] = useState(false);
+
+  // 一键载入常用短语；已存在的标题跳过，避免重复
+  const handleSeedPhrases = async () => {
+    const existing = new Set(phrases.map(p => p.title));
+    const pending = PRESET_PHRASES.filter(p => !existing.has(p.title));
+    if (pending.length === 0) {
+      notify('常用短语都已存在', 'info');
+      return;
+    }
+    setSeedingPhrases(true);
+    try {
+      for (const p of pending) {
+        await createQuickPhrase(p.title, p.content, p.category);
+      }
+      loadPhrases();
+      notify(`已载入 ${pending.length} 条常用短语`, 'success');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '载入失败', 'error');
+    } finally {
+      setSeedingPhrases(false);
+    }
+  };
 
   const handleAddPhrase = async () => {
     if (!phraseForm.title.trim() || !phraseForm.content.trim()) return;
@@ -567,6 +604,17 @@ const Settings: React.FC = () => {
             description="人工客服常用话术，在消息管理页可一键插入到输入框。"
             icon={Zap}
           />
+          <div className="flex justify-end px-4 pt-1">
+            <button
+              type="button"
+              onClick={() => void handleSeedPhrases()}
+              disabled={seedingPhrases}
+              className="ios-btn-secondary flex items-center gap-1.5 rounded-md px-3 py-2 text-xs disabled:opacity-60"
+            >
+              <Zap className="h-3.5 w-3.5" />
+              {seedingPhrases ? '载入中…' : '载入常用短语'}
+            </button>
+          </div>
           <div className="grid gap-3 p-4 sm:grid-cols-[140px_200px_1fr_auto]">
             <input
               value={phraseForm.category}
@@ -708,6 +756,9 @@ const Settings: React.FC = () => {
                 placeholder="smtp.qq.com"
                 className="ios-input w-full rounded-md px-3 py-2.5 text-sm"
               />
+              <span className="mt-1 block text-xs text-gray-500">
+                常用：QQ 邮箱 smtp.qq.com、163 邮箱 smtp.163.com、企业微信邮箱 smtp.exmail.qq.com。
+              </span>
             </label>
 
             <label>

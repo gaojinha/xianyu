@@ -635,7 +635,7 @@ const Keywords: React.FC<KeywordsProps> = ({ mode }) => {
             <div className="modal-header flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-gray-900">{editingKeyword ? '编辑关键词回复' : '添加关键词回复'}</h3>
-                <p className="mt-1 text-sm text-gray-500">当前规则使用精确匹配。</p>
+                <p className="mt-1 text-sm text-gray-500">精确匹配：买家整条消息与关键词完全一致才触发；想匹配"包含"请拆成多条规则。关键词回复优先于 AI 与默认回复。</p>
               </div>
               <button type="button" onClick={() => setShowReplyModal(false)} className="rounded-md p-2 hover:bg-gray-100" aria-label="关闭">
                 <X className="h-5 w-5" />
@@ -656,7 +656,7 @@ const Keywords: React.FC<KeywordsProps> = ({ mode }) => {
                 <textarea
                   value={replyForm.reply_content}
                   onChange={(event) => setReplyForm({ ...replyForm, reply_content: event.target.value })}
-                  placeholder="输入自动回复内容"
+                  placeholder="例如：在的亲，这款还有货，可以直接拍～"
                   rows={7}
                   className="ios-input w-full resize-y rounded-md px-3 py-2.5"
                 />
@@ -812,7 +812,7 @@ const Keywords: React.FC<KeywordsProps> = ({ mode }) => {
                 <textarea
                   value={defaultForm.reply_content}
                   onChange={(event) => setDefaultForm({ ...defaultForm, reply_content: event.target.value })}
-                  placeholder="输入默认回复内容"
+                  placeholder="例如：你好，我现在不在，看到后马上回您～"
                   rows={7}
                   className="ios-input w-full resize-y rounded-md px-3 py-2.5"
                 />
