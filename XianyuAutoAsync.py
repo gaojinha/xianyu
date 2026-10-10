@@ -9529,6 +9529,24 @@ class XianyuLive:
             self.message_debounce_tasks[chat_id]['task'] = task
             logger.warning(f"【{self.cookie_id}】为chat_id {chat_id} 创建防抖任务，延迟 {self.message_debounce_delay} 秒")
 
+    def _is_own_item_consultation(self, item_id: str) -> bool:
+        """判断这条消息是否属于"本店商品的咨询"。
+
+        系统分不清账号在会话里是买家还是卖家 —— 收到消息一律当买家咨询。
+        用户拿卖家号去别人店里买东西时，对方卖家发来的话会被误当成买家咨询，
+        自动回复就会去插话。这里用商品归属兜底：商品不在本店商品库，就判定为
+        买家咨询，不自动回复。归属不明（item_id 缺失或 auto_ 占位）时保守跳过，
+        宁可漏回也不插话。
+        """
+        if not item_id or str(item_id).startswith('auto_'):
+            return False
+        try:
+            from app.db_manager import db_manager
+            return db_manager.is_own_item(self.cookie_id, str(item_id))
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】判断商品归属失败: {self._safe_str(e)}")
+            return False
+
     async def _process_chat_message_reply(self, message_data: dict, websocket, send_user_name: str,
                                          send_user_id: str, send_message: str, item_id: str,
                                          chat_id: str, msg_time: str):
@@ -9572,6 +9590,22 @@ class XianyuLive:
                 )
                 logger.info(
                     f"[{msg_time}] 【{self.cookie_id}】消息命中过滤规则“{matched_filter}”，跳过自动回复"
+                )
+                return
+
+            # 只回本店商品的咨询。用户拿卖家号去别人店里买东西时，对方卖家的消息
+            # 会被误当成"买家咨询"，自动回复就去插话。商品不在本店商品库即跳过。
+            if not self._is_own_item_consultation(item_id):
+                self._add_reply_decision_log(
+                    message_data,
+                    **log_context,
+                    process_status="skipped",
+                    decision_reason="not_own_item",
+                    reply_strategy="none",
+                    send_status="unknown",
+                )
+                logger.info(
+                    f"[{msg_time}] 【{self.cookie_id}】商品 {item_id} 非本店，判定为买家咨询，跳过自动回复"
                 )
                 return
 

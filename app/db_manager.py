@@ -2807,6 +2807,27 @@ class DBManager:
                 return {}
 
     # -------------------- AI回复设置操作 --------------------
+    def is_own_item(self, cookie_id: str, item_id: str) -> bool:
+        """判断某商品是否属于指定账号的本店商品。
+
+        用于自动回复的角色兜底：系统分不清账号在会话里是买家还是卖家，
+        用户拿卖家号去别人店里买东西时，对方卖家的话会被误当成买家咨询。
+        商品不在本店商品库即判定为"买家咨询"，不自动回复。
+        """
+        if not cookie_id or not item_id:
+            return False
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM item_info WHERE cookie_id = ? AND item_id = ? LIMIT 1",
+                    (cookie_id, str(item_id)),
+                )
+                return cursor.fetchone() is not None
+            except Exception as e:
+                logger.error(f"判断商品归属失败: {e}")
+                return False
+
     def save_ai_reply_settings(self, cookie_id: str, settings: dict) -> bool:
         """保存AI回复设置"""
         with self.lock:
