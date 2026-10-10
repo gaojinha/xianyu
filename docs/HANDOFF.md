@@ -26,6 +26,31 @@
 - [部署说明](deployment.md) 已与上述配置对齐，并说明平台人机验证应由账号所有者通过官方页面完成，不应绕过。
 - GitHub Actions CI 已新增后端测试/编译及前端类型检查/构建任务，在 `main` 推送和面向 `main` 的 PR 上运行。
 
+## AI 回复架构与话术边界（2026-10-10）
+
+本项目遵循"一个脑子，其余都是手"：AI 能力由本机二狗大脑（opencode）统一提供，
+项目不各配第三方模型。
+
+- **大脑通道**：`app/local_ai_gateway.py` 提供 OpenAI 兼容端点（仅绑 127.0.0.1:8090），
+  内部把请求转给本机 opencode。`ai_reply_engine` 无第三方配置时自动回落到该通道；
+  账号页与系统设置均已去掉"第三方模型/密钥"入口。
+- **人格隔离**：网关每次调用前置 `DE_PERSONA` 护栏，压制 opencode 默认 agent 的
+  "二狗"人设，禁止出现内部称呼并禁用工具。
+- **出口校验**：`ai_reply_engine._normalize_reply` 命中内部称呼（高哥/二狗）或
+  AI 身份词（机器人/人工智能/提示词等）即整条丢弃，不发给买家。
+- **只回本店商品**：`_process_chat_message_reply` 用 `db_manager.is_own_item` 判断，
+  商品不在本店商品库即视为"买家咨询"（用户拿卖家号去买东西），跳过自动回复。
+- **风险转人工**：命中投诉维权、要求私下交易、辱骂等风险词，不自动回。
+- **勿扰时段**：系统设置可配（`dnd_enabled`/`dnd_start`/`dnd_end`，支持跨夜），
+  时段内不自动回复。
+- **话术红线**：写进每次回复的 system（不暴露 AI、不编造、不擅自承诺、不泄露、
+  不越权），发货/售后统一"以订单页为准"。
+- **自动化审计**：自动发货有幂等（已发集合+冷却+订单锁），商品自动化与商品擦亮
+  均写入 `automation_task_runs` 留痕。
+
+回归测试：`tests/test_local_ai_gateway.py`、`tests/test_manual_captcha_gate.py`、
+`tests/test_own_item_gate.py`、`tests/test_reply_boundaries.py`。
+
 ## 验证记录与限制
 
 本轮在本地虚拟环境安装 `requirements.txt` 依赖，并安装 Playwright Chromium 后完成以下检查：
