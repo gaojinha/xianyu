@@ -14,7 +14,7 @@ class AIReplyEngineTests(unittest.TestCase):
         prompt = self.engine._resolve_system_prompt("不要承诺库存，回复保持简短。", "default")
 
         self.assertIn("不要承诺库存", prompt)
-        self.assertIn("资深电商卖家", prompt)
+        self.assertIn("卖家客服", prompt)
 
     def test_reply_is_normalized_and_limited(self):
         reply = self.engine._normalize_reply('  "你好，   现货可拍。"  ')
