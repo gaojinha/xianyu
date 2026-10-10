@@ -61,12 +61,12 @@
 - 标准和 NAS Compose 配置检查：通过；使用临时 `ADMIN_PASSWORD` 满足必填插值，没有写入 `.env`。
 - `git diff --check`：通过。
 
-前端当前没有声明 Vitest、lint 脚本；这些检查尚未配置，不能视为已通过。上述检查不替代真实部署和账号功能验证。
+前端已配置 Vitest 单测（`npm test`，CI 已接入）；lint 尚未配置。上述检查不替代真实部署和账号功能验证。
 
 ## 后续建议
 
 1. 在 GitHub 仓库设置中启用 `main` 分支保护，并将 CI 的 `Backend tests`、`Frontend checks` 设为必需检查；确认自动更新统计数据的 workflow 与保护规则兼容。
-2. 继续区分本项目 `origin` 与上游 `upstream`；前端 Vitest 和 lint 尚未配置。
+2. 继续区分本项目 `origin` 与上游 `upstream`；前端 Vitest 已配置（`npm test`），lint 尚未配置。
 3. 按 [项目蓝图](PROJECT_BLUEPRINT.md) 先审视账号隔离、写操作幂等、权限、速率限制、审计和敏感数据处理，再增加 CLI/MCP 或市场监控功能。
 4. 任何真实账号写操作先用测试账号验证；遇到平台人机验证时由账号所有者按官方流程处理。
 
