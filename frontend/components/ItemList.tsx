@@ -1291,7 +1291,7 @@ const ItemList: React.FC = () => {
 
       {detailItem && createPortal(
         <div className="modal-overlay">
-          <div className="modal-container">
+          <div className="modal-container modal-container-lg">
             <div className="modal-header flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-gray-900">编辑商品详情</h3>
@@ -1302,14 +1302,20 @@ const ItemList: React.FC = () => {
               </button>
             </div>
             <div className="modal-body">
-              <label className="mb-2 block text-sm font-bold text-gray-700" htmlFor="item-detail">本地商品详情</label>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <label className="block text-sm font-bold text-gray-700" htmlFor="item-detail">本地商品详情</label>
+                <span className="text-xs text-gray-400">{itemDetail.length} 字</span>
+              </div>
               <textarea
                 id="item-detail"
                 value={itemDetail}
                 onChange={event => setItemDetail(event.target.value)}
-                className="ios-input min-h-64 w-full resize-y rounded-md p-3 font-mono text-sm"
-                placeholder="补充商品说明，供自动回复和发货逻辑读取。"
+                className="ios-input min-h-[58vh] w-full resize-y rounded-md p-3 font-mono text-sm leading-6"
+                placeholder="补充商品说明（规格、成色、配件、注意事项等），供自动回复和发货逻辑读取。"
               />
+              <p className="mt-2 text-xs text-gray-500">
+                这段会作为 AI 回复时的"商品事实"参考。写清规格、成色、配件即可；别写库存、发货时效、赔付这类承诺。
+              </p>
             </div>
             <div className="modal-footer flex justify-end gap-2">
               <button type="button" onClick={() => setDetailItem(null)} className="ios-btn-secondary rounded-md px-4 py-2.5">取消</button>
