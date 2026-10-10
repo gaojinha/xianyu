@@ -57,15 +57,10 @@ class DBManager:
         self.conn = None
         self.lock = threading.RLock()  # 使用可重入锁保护数据库操作
 
-        # SQL日志配置 - 默认启用
-        self.sql_log_enabled = True  # 默认启用SQL日志
-        self.sql_log_level = 'INFO'  # 默认使用INFO级别
-
-        # 允许通过环境变量覆盖默认设置
-        if os.getenv('SQL_LOG_ENABLED'):
-            self.sql_log_enabled = os.getenv('SQL_LOG_ENABLED', 'true').lower() == 'true'
-        if os.getenv('SQL_LOG_LEVEL'):
-            self.sql_log_level = os.getenv('SQL_LOG_LEVEL', 'INFO').upper()
+        # SQL日志配置。默认关闭：逐条记录每条 SQL 会让日志单日膨胀到几十 MB，
+        # 排障时用环境变量 SQL_LOG_ENABLED=true 临时打开即可。
+        self.sql_log_enabled = os.getenv('SQL_LOG_ENABLED', 'false').lower() == 'true'
+        self.sql_log_level = os.getenv('SQL_LOG_LEVEL', 'DEBUG').upper()
 
         logger.info(f"SQL日志已启用，日志级别: {self.sql_log_level}")
 
@@ -1171,7 +1166,8 @@ class DBManager:
         try:
             # 获取当前数据库版本
             current_version = self.get_system_setting("db_version") or "1.0"
-            logger.info(f"当前数据库版本: {current_version}")
+            # 降到 debug：初始化被多次触发时，这行会在日志里刷屏。
+            logger.debug(f"当前数据库版本: {current_version}")
 
             # 结构校验不能只依赖版本号。部分历史数据库已写入较新版本号，
             # 但 delivery_rules 等表仍可能缺少用户隔离字段。
