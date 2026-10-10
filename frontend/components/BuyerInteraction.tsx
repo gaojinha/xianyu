@@ -15,7 +15,9 @@ import { NoticeBanner, PageHeader, PageLoading, SectionHeader } from './ui';
 
 const MAX_TEMPLATE_LENGTH = 200;
 
-const DEFAULT_TEMPLATE = '宝贝收到了，很满意，感谢老板，欢迎下次再来！';
+// 卖家评价买家的默认文案。注意口吻：这是卖家夸买家，不能用"宝贝收到了很满意"
+// 之类的买家口吻（那是买家评价卖家的话）。
+const DEFAULT_TEMPLATE = '买家很爽快、好沟通，交易顺利，感谢支持，欢迎下次再来！';
 
 const DEFAULT_THANKS = '亲，感谢支持！有任何问题随时找我~';
 

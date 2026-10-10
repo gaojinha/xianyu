@@ -9118,9 +9118,9 @@ API_ROOTS = {
 # 评价和求花都会产生不可撤销的对外动作，默认关闭，需显式开启后才允许调用
 AUTO_RATE_SETTING_KEY = 'auto_rate_enabled'
 AUTO_FLOWER_SETTING_KEY = 'auto_flower_enabled'
-# 默认评价文案。订单页打开评价框时预填，避免每单重复手打，仍可逐单改。
+# 默认评价文案（卖家评价买家，口吻要对）。订单页打开评价框时预填，可逐单改。
 RATE_TEMPLATE_SETTING_KEY = 'auto_rate_template'
-DEFAULT_RATE_TEMPLATE = '宝贝收到了，很满意，感谢老板，欢迎下次再来！'
+DEFAULT_RATE_TEMPLATE = '买家很爽快、好沟通，交易顺利，感谢支持，欢迎下次再来！'
 
 
 def _seller_feature_enabled(key: str) -> bool:
