@@ -122,6 +122,7 @@ async def polish_account_items(
     cookies_str: str,
     item_ids: Optional[List[str]] = None,
     interval: float = 1.0,
+    mode: str = 'manual',
 ) -> Dict[str, Any]:
     """批量擦亮账号下的商品。
 
@@ -171,6 +172,33 @@ async def polish_account_items(
     logger.info(
         f"【{cookie_id}】商品擦亮完成: 共 {len(item_ids)} 个，成功 {success}，失败 {failed}"
     )
+
+    # 审计留痕：自动化动作跑了多少、成败几何，写进 automation_task_runs（与商品自动化共用）
+    try:
+        with db_manager.lock:
+            cur = db_manager.conn.cursor()
+            cur.execute("SELECT user_id FROM cookies WHERE id = ?", (cookie_id,))
+            row = cur.fetchone()
+            uid = row[0] if row else None
+            cur.execute(
+                """
+                INSERT INTO automation_task_runs (
+                    user_id, cookie_id, task_type, rule_id, execution_mode,
+                    checked_count, matched_count, changed_count, failed_count,
+                    summary, details, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uid, cookie_id, 'item_polish', None, mode,
+                    len(item_ids), len(item_ids), success, failed,
+                    f"擦亮 {len(item_ids)} 个，成功 {success}，失败 {failed}",
+                    json.dumps(details, ensure_ascii=False), '',
+                ),
+            )
+            db_manager.conn.commit()
+    except Exception as e:
+        logger.warning(f"【{cookie_id}】擦亮审计记录失败: {e}")
+
     return {
         "total": len(item_ids),
         "success": success,
