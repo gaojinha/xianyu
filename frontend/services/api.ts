@@ -1,17 +1,18 @@
 import { get, post, put, del, patch } from '../lib/request';
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
-  AdminStats, AdminUser, Card, CardShipment, SystemSettings, ApiResponse, OrderAnalytics,
+  AdminStats, AdminUser, Card, CardShipment, AutoDeliveryRun, SystemSettings, ApiResponse, OrderAnalytics,
   Item, ItemDeliveryConfig, ItemDeliveryConfigSummary,
   ProductVariantBinding, AIReplySettings, ShippingRule, ReplyRule, DefaultReply,
   DeliveryBlockRule, PersonalBlacklistEntry, MessageNotification,
   NotificationChannel, NotificationChannelType, RiskControlLog, SystemLog,
   NotificationEventDefinition, NotificationPriorityDefinition,
+  NotificationDeliveryLog,
   MessageFilter, MessageFilterType, AutoReplyLog
   , ChatAccount, ChatConversation, ChatMessage, ProductMaterial,
   ProductFilterRule, ProductDeleteRule, AutomationTaskRun,
   ProductAutomationResult, ProductDeletePreview, QuickPhrase,
-  AnnouncementPayload
+  AnnouncementPayload, OperationalSummary
 } from '../types';
 
 // Auth
@@ -229,11 +230,17 @@ export const syncSingleOrder = async (orderId: string): Promise<any> => {
   return post(`/api/orders/${orderId}/refresh`);
 };
 
-export const manualShipOrder = async (orderIds: string[], shipMode: 'status_only' | 'full_delivery', content?: string): Promise<any> => {
+export const manualShipOrder = async (
+  orderIds: string[],
+  shipMode: 'status_only' | 'full_delivery',
+  content?: string,
+  operatorReason?: string
+): Promise<any> => {
     return post('/api/orders/manual-ship', {
         order_ids: orderIds,
         ship_mode: shipMode,
-        custom_content: content
+        custom_content: content,
+        operator_reason: operatorReason
     });
 }
 
@@ -449,6 +456,10 @@ export const getAdminStats = async (): Promise<AdminStats> => {
   return get('/admin/stats');
 };
 
+export const getOperationalSummary = async (): Promise<OperationalSummary> => {
+  return get('/dashboard/operations');
+};
+
 // User Management（管理员专用）
 export const getAdminUsers = async (): Promise<AdminUser[]> => {
   const res = await get<{ users: AdminUser[] }>('/admin/users');
@@ -527,6 +538,43 @@ export const getCardShipments = async (limit = 200): Promise<{ total: number; sh
     '/cards/shipped', { limit }
   );
   return { total: res.total || 0, shipments: res.shipments || [] };
+};
+
+/** 自动发货执行审计记录，不包含发货内容或账号凭据。 */
+export const getAutoDeliveryRuns = async (options: {
+  cookieId?: string;
+  status?: AutoDeliveryRun['status'];
+  limit?: number;
+} = {}): Promise<AutoDeliveryRun[]> => {
+  const params: Record<string, string | number> = {  };
+  if (options.cookieId) params.cookie_id = options.cookieId;
+  if (options.status) params.status = options.status;
+  if (options.limit) params.limit = options.limit;
+  const res = await get<{ success: boolean; runs: AutoDeliveryRun[] }>(
+    '/delivery/automation-runs',
+    params,
+  );
+  return res.runs || [];
+};
+
+export const resolveAutoDeliveryRun = async (runId: number, note: string): Promise<void> => {
+  await post(`/delivery/automation-runs/${runId}/resolve`, { note });
+};
+
+export const getNotificationDeliveryLogs = async (options: {
+  cookieId?: string;
+  status?: NotificationDeliveryLog['status'];
+  limit?: number;
+} = {}): Promise<NotificationDeliveryLog[]> => {
+  const params: Record<string, string | number> = {};
+  if (options.cookieId) params.cookie_id = options.cookieId;
+  if (options.status) params.status = options.status;
+  if (options.limit) params.limit = options.limit;
+  const response = await get<{ success: boolean; data: NotificationDeliveryLog[] }>(
+    '/notification-delivery-logs',
+    params,
+  );
+  return response.data || [];
 };
 
 export const clearCardShipments = async (): Promise<ApiResponse & { deleted?: number }> => {
@@ -758,6 +806,44 @@ export const getProductAutomationRuns = async (limit: number = 50): Promise<Auto
     { limit },
   );
   return response.data || [];
+};
+
+export interface BulkListingPreflight {
+  run_id: number;
+  summary: string;
+  valid_count: number;
+  failed_count: number;
+  details: Array<{
+    row: number;
+    status: 'valid' | 'invalid';
+    errors: string[];
+    material: Record<string, unknown>;
+  }>;
+}
+
+export const preflightBulkListingFile = async (
+  cookieId: string,
+  file: File,
+): Promise<BulkListingPreflight> => {
+  const form = new FormData();
+  form.append('cookie_id', cookieId);
+  form.append('upload_file', file);
+  const response = await post<{ success: boolean; data: BulkListingPreflight }>(
+    '/product-automation/bulk/preflight',
+    form,
+  );
+  return response.data;
+};
+
+export const importBulkListingDrafts = async (runId: number): Promise<{
+  imported_count: number;
+  message: string;
+}> => {
+  const response = await post<{
+    success: boolean;
+    data: { imported_count: number; message: string };
+  }>(`/product-automation/bulk/preflight/${runId}/import`, { confirmed: true });
+  return response.data;
 };
 
 const runProductRepair = async (path: string): Promise<ProductAutomationResult> => {

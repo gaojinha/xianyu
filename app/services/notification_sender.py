@@ -15,6 +15,8 @@ import hashlib
 import hmac
 import inspect
 import json
+import mimetypes
+import os
 import smtplib
 import time
 from dataclasses import dataclass
@@ -145,6 +147,7 @@ class NotificationSender:
         message: str,
         *,
         request_id: str | None = None,
+        attachment_path: str | None = None,
     ) -> NotificationSendReceipt:
         if not isinstance(message, str) or not message.strip():
             raise NotificationChannelConfigError("测试消息不能为空")
@@ -161,6 +164,13 @@ class NotificationSender:
         }
         handler = handlers[normalized_type]
         try:
+            if normalized_type == "email":
+                return await self._send_email(
+                    config_data,
+                    message,
+                    request_id=request_id,
+                    attachment_path=attachment_path,
+                )
             return await handler(config_data, message, request_id=request_id)
         except NotificationChannelConfigError:
             raise
@@ -298,12 +308,17 @@ class NotificationSender:
         return NotificationSendReceipt("bark", status, code)
 
     async def _send_email(
-        self, config: dict[str, Any], message: str, *, request_id: str | None = None
+        self,
+        config: dict[str, Any],
+        message: str,
+        *,
+        request_id: str | None = None,
+        attachment_path: str | None = None,
     ) -> NotificationSendReceipt:
         sender = self.email_sender or self._send_email_sync
         try:
             await asyncio.wait_for(
-                self._run_email_sender(sender, config, message),
+                self._run_email_sender(sender, config, message, attachment_path),
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
@@ -319,26 +334,46 @@ class NotificationSender:
         sender: Callable[[dict[str, Any], str], Any],
         config: dict[str, Any],
         message: str,
+        attachment_path: str | None = None,
     ) -> Any:
         """Run sync SMTP code off-loop while still accepting async test doubles."""
         is_async = inspect.iscoroutinefunction(sender) or inspect.iscoroutinefunction(
             getattr(sender, "__call__", None)
         )
         if is_async:
-            result = sender(config, message)
+            result = (
+                sender(config, message, attachment_path)
+                if attachment_path
+                else sender(config, message)
+            )
         else:
-            result = await asyncio.to_thread(sender, config, message)
+            args = (config, message, attachment_path) if attachment_path else (config, message)
+            result = await asyncio.to_thread(sender, *args)
         if inspect.isawaitable(result):
             return await result
         return result
 
     @staticmethod
-    def _send_email_sync(config: dict[str, Any], message: str) -> None:
+    def _send_email_sync(
+        config: dict[str, Any], message: str, attachment_path: str | None = None
+    ) -> None:
         email = EmailMessage()
         email["Subject"] = _EMAIL_SUBJECT
         email["From"] = str(config["email_user"])
         email["To"] = str(config["recipient_email"])
         email.set_content(message)
+        if attachment_path:
+            if not os.path.isfile(attachment_path):
+                raise OSError("通知附件不存在或不可读取")
+            mime_type, _ = mimetypes.guess_type(attachment_path)
+            maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
+            with open(attachment_path, "rb") as attachment:
+                email.add_attachment(
+                    attachment.read(),
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=os.path.basename(attachment_path),
+                )
 
         smtp_server = str(config["smtp_server"])
         smtp_port = int(config["smtp_port"])

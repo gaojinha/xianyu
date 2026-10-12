@@ -3,7 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: xianyu-seller-console:latest
+      args:
+        APP_VERSION: "${APP_VERSION:-3.2.0}"
+        APP_REVISION: "${APP_REVISION:-unknown}"
+    image: "${IMAGE_NAME:-xianyu-seller-console}:${IMAGE_TAG:-latest}"
     container_name: xianyu-seller-console
     restart: unless-stopped
     user: "0:0"
@@ -19,6 +22,8 @@ services:
       PYTHONDONTWRITEBYTECODE: "${PYTHONDONTWRITEBYTECODE:-1}"
       TZ: "${TZ:-Asia/Shanghai}"
       DB_PATH: "${DB_PATH:-/app/data/xianyu_data.db}"
+      MIGRATION_BACKUP_DIR: "${MIGRATION_BACKUP_DIR:-/app/backups/migrations}"
+      APP_ENCRYPTION_KEY_FILE: "${APP_ENCRYPTION_KEY_FILE:-/app/data/app-encryption.key}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       DEBUG: "${DEBUG:-false}"
       RELOAD: "${RELOAD:-false}"

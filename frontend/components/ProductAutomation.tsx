@@ -14,6 +14,7 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  Upload,
   Workflow,
   X,
 } from 'lucide-react';
@@ -26,6 +27,11 @@ import {
   ProductFilterRule,
   ProductMaterial,
 } from '../types';
+import {
+  BulkListingPreflight,
+  importBulkListingDrafts,
+  preflightBulkListingFile,
+} from '../services/api';
 import {
   compensateProductCards,
   deleteProductDeleteRule,
@@ -54,10 +60,11 @@ import {
   SectionHeader,
 } from './ui';
 
-type TabKey = 'materials' | 'filters' | 'delete' | 'repairs';
+type TabKey = 'materials' | 'bulk' | 'filters' | 'delete' | 'repairs';
 
 const tabs: Array<{ id: TabKey; label: string; icon: React.ElementType }> = [
   { id: 'materials', label: '素材库', icon: Archive },
+  { id: 'bulk', label: '批量预检', icon: FileSearch },
   { id: 'filters', label: '筛选规则', icon: Search },
   { id: 'delete', label: '删除计划', icon: Trash2 },
   { id: 'repairs', label: '补偿任务', icon: ShieldCheck },
@@ -128,6 +135,10 @@ const ProductAutomation: React.FC = () => {
   const [filterForm, setFilterForm] = useState(emptyFilterForm);
   const [deleteForm, setDeleteForm] = useState(emptyDeleteForm);
   const [preview, setPreview] = useState<ProductDeletePreview | null>(null);
+  const [bulkAccount, setBulkAccount] = useState('');
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [bulkPreflight, setBulkPreflight] = useState<BulkListingPreflight | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const accountNames = useMemo(
     () => new Map(accounts.map((account) => [
@@ -169,6 +180,7 @@ const ProductAutomation: React.FC = () => {
       if (!filterForm.cookie_id && accountData[0]) {
         setFilterForm((current) => ({ ...current, cookie_id: accountData[0].id }));
       }
+      if (!bulkAccount && accountData[0]) setBulkAccount(accountData[0].id);
       if (!deleteForm.cookie_id && accountData[0]) {
         setDeleteForm((current) => ({ ...current, cookie_id: accountData[0].id }));
       }
@@ -176,6 +188,43 @@ const ProductAutomation: React.FC = () => {
       notify(`商品自动化数据加载失败：${(error as Error).message}`, 'error');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleBulkPreflight = async () => {
+    if (!bulkAccount || !bulkFile) {
+      notify('请选择账号和 CSV/TSV 文件', 'error');
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const result = await preflightBulkListingFile(bulkAccount, bulkFile);
+      setBulkPreflight(result);
+      await loadAll(false);
+      notify(result.summary, result.failed_count ? 'error' : 'success');
+    } catch (error) {
+      notify(`批量预检失败：${(error as Error).message}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleBulkImport = async () => {
+    if (!bulkPreflight || bulkPreflight.valid_count === 0) return;
+    if (!await confirmAction(
+      `确认导入 ${bulkPreflight.valid_count} 行有效数据到本地素材草稿？此操作不会发布商品。`,
+    )) return;
+    setBulkBusy(true);
+    try {
+      const result = await importBulkListingDrafts(bulkPreflight.run_id);
+      notify(result.message);
+      setBulkPreflight(null);
+      setBulkFile(null);
+      await loadAll(false);
+    } catch (error) {
+      notify(`导入草稿失败：${(error as Error).message}`, 'error');
+    } finally {
+      setBulkBusy(false);
     }
   };
 
@@ -514,6 +563,7 @@ const ProductAutomation: React.FC = () => {
                               <ExternalLink className="h-4 w-4" />
                             </a>
                           )}
+
                           <button
                             type="button"
                             title="编辑素材"
@@ -539,6 +589,101 @@ const ProductAutomation: React.FC = () => {
               </table>
             </div>
             {visibleMaterials.length === 0 && <EmptyState compact title="暂无素材" description="运行筛选规则后，符合条件的商品会进入本地素材库。" icon={Archive} />}
+          </div>
+        </section>
+      )}
+
+      {activeTab === 'bulk' && (
+        <section className="section-panel">
+          <SectionHeader
+            title="批量商品数据预检"
+            description="仅验证并导入本地素材草稿，不会调用平台发布接口。每批最多 200 行、5 MB。"
+            icon={FileSearch}
+          />
+          <div className="space-y-4 p-4">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                目标账号
+                <select
+                  value={bulkAccount}
+                  onChange={(event) => {
+                    setBulkAccount(event.target.value);
+                    setBulkPreflight(null);
+                  }}
+                  className="ios-input min-w-56 rounded-md px-3 py-2.5"
+                >
+                  {accounts.map((account) => (
+                    <option key={account.id} value={account.id}>{accountNames.get(account.id)}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                CSV/TSV 文件
+                <input
+                  type="file"
+                  accept=".csv,.tsv,text/csv,text/tab-separated-values"
+                  onChange={(event) => {
+                    setBulkFile(event.target.files?.[0] || null);
+                    setBulkPreflight(null);
+                  }}
+                  className="max-w-full text-sm"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleBulkPreflight()}
+                disabled={bulkBusy || !bulkAccount || !bulkFile}
+                className="ios-btn-primary flex items-center gap-2 rounded-md px-4 py-2.5 text-sm disabled:opacity-50"
+              >
+                {bulkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                上传并预检
+              </button>
+              <a
+                href={`data:text/csv;charset=utf-8,${encodeURIComponent(
+                  'source_item_id,title,description,category,price,images,source_url,delivery_content\nsource-001,Sample item,Description,Digital,9.9,https://example.com/image.jpg,https://example.com/item,',
+                )}`}
+                download="bulk-listing-template.csv"
+                className="ios-btn-secondary rounded-md px-4 py-2.5 text-sm"
+              >
+                下载 CSV 模板
+              </a>
+            </div>
+            {bulkPreflight && (
+              <div className="space-y-3">
+                <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                  {bulkPreflight.summary}
+                </div>
+                <div className="max-h-[28rem] overflow-auto rounded-md border border-gray-200">
+                  <table className="data-table min-w-[720px] text-sm">
+                    <thead><tr><th>行</th><th>状态</th><th>商品</th><th>校验结果</th></tr></thead>
+                    <tbody>
+                      {bulkPreflight.details.map((row) => (
+                        <tr key={row.row}>
+                          <td>{row.row}</td>
+                          <td className={row.status === 'valid' ? 'text-emerald-700' : 'text-red-700'}>
+                            {row.status === 'valid' ? '有效' : '无效'}
+                          </td>
+                          <td>{String(row.material.title || row.material.source_item_id || '')}</td>
+                          <td>{row.errors.join('；') || '可导入为本地草稿'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleBulkImport()}
+                  disabled={bulkBusy || bulkPreflight.valid_count === 0}
+                  className="ios-btn-primary rounded-md px-4 py-2.5 text-sm disabled:opacity-50"
+                >
+                  确认导入 {bulkPreflight.valid_count} 行有效草稿
+                </button>
+              </div>
+            )}
+            <p className="text-xs leading-5 text-gray-500">
+              必需列：source_item_id、title、description、category、price、images、source_url、delivery_content。
+              图片列使用 HTTP/HTTPS URL，多张图片以竖线分隔；压缩包和本地路径不接收。
+            </p>
           </div>
         </section>
       )}

@@ -36,8 +36,12 @@ COPY --from=frontend-builder /frontend/dist ./static
 
 FROM base AS runtime
 
+ARG APP_VERSION=3.2.0
+ARG APP_REVISION=unknown
+
 LABEL maintainer="23Star" \
-      version="3.0.0-beta" \
+      version="${APP_VERSION}" \
+      revision="${APP_REVISION}" \
       description="Xianyu account, item, order, reply, and delivery management" \
       repository="https://github.com/23Star/xianyu-super-butler" \
       author="23Star"
@@ -62,6 +66,8 @@ COPY --from=builder /app /app
 
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV APP_BUILD_VERSION="${APP_VERSION}" \
+    APP_BUILD_REVISION="${APP_REVISION}"
 
 RUN playwright install-deps chromium && \
     playwright install chromium && \

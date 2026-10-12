@@ -7,10 +7,17 @@ import random
 import string
 import io
 import base64
+import re
+from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
 from typing import List, Tuple, Dict, Optional, Any
 from loguru import logger
 from app.password_hasher import hash_password, is_bcrypt_hash, verify_password
+from app.secret_store import (
+    decrypt_secret,
+    encrypt_secret,
+    encryption_enabled,
+)
 from app.specification import (
     DEFAULT_SPEC_KEY,
     canonicalize_specification,
@@ -22,6 +29,8 @@ _UNSET = object()
 
 class DBManager:
     """SQLite数据库管理，持久化存储Cookie和关键字"""
+
+    MAX_SAFE_DELIVERY_ATTEMPTS = 3
     
     def __init__(self, db_path: str = None):
         """初始化数据库连接和表结构"""
@@ -56,6 +65,7 @@ class DBManager:
         logger.info(f"数据库路径: {self.db_path}")
         self.conn = None
         self.lock = threading.RLock()  # 使用可重入锁保护数据库操作
+        self._create_pre_migration_snapshot()
 
         # SQL日志配置。默认关闭：逐条记录每条 SQL 会让日志单日膨胀到几十 MB，
         # 排障时用环境变量 SQL_LOG_ENABLED=true 临时打开即可。
@@ -65,6 +75,61 @@ class DBManager:
         logger.info(f"SQL日志已启用，日志级别: {self.sql_log_level}")
 
         self.init_db()
+
+    @staticmethod
+    def _version_parts(value: str) -> Tuple[int, ...]:
+        try:
+            return tuple(int(part) for part in str(value).split("."))
+        except ValueError:
+            return (0,)
+
+    def _create_pre_migration_snapshot(self) -> None:
+        if not os.path.isfile(self.db_path) or os.path.getsize(self.db_path) == 0:
+            return
+
+        source = sqlite3.connect(self.db_path)
+        temporary_path = None
+        try:
+            table = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'system_settings'"
+            ).fetchone()
+            version = "unknown"
+            if table:
+                row = source.execute(
+                    "SELECT value FROM system_settings WHERE key = 'db_version'"
+                ).fetchone()
+                version = str(row[0]) if row and row[0] else "1.0"
+            if version != "unknown" and self._version_parts(version) >= (1, 8):
+                return
+
+            backup_dir = os.getenv(
+                "MIGRATION_BACKUP_DIR",
+                os.path.join(os.path.dirname(os.path.abspath(self.db_path)), "backups", "migrations"),
+            )
+            os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+            os.chmod(backup_dir, 0o700)
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            filename = f"xianyu-pre-migration-{version}-to-1.8-{timestamp}.db"
+            destination_path = os.path.join(backup_dir, filename)
+            temporary_path = destination_path + ".tmp"
+            destination = sqlite3.connect(temporary_path)
+            try:
+                source.backup(destination)
+                integrity = destination.execute("PRAGMA quick_check").fetchone()
+                if not integrity or integrity[0] != "ok":
+                    raise sqlite3.DatabaseError("Migration snapshot integrity check failed")
+            finally:
+                destination.close()
+            os.chmod(temporary_path, 0o600)
+            os.replace(temporary_path, destination_path)
+            logger.info(f"已创建数据库迁移前快照: {destination_path}")
+        except Exception:
+            logger.exception("无法创建迁移前数据库快照，已中止数据库初始化")
+            raise
+        finally:
+            source.close()
+            if temporary_path and os.path.exists(temporary_path):
+                os.remove(temporary_path)
     
     def init_db(self):
         """初始化数据库表结构"""
@@ -283,6 +348,39 @@ class DBManager:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
             )
+            ''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auto_delivery_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cookie_id TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                trigger_name TEXT NOT NULL DEFAULT 'paid_delivery',
+                item_id TEXT DEFAULT '',
+                buyer_id TEXT DEFAULT '',
+                chat_id TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'processing'
+                    CHECK (status IN ('processing', 'completed', 'failed', 'needs_review')),
+                current_step TEXT NOT NULL DEFAULT 'claimed',
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                expected_count INTEGER NOT NULL DEFAULT 0,
+                acquired_count INTEGER NOT NULL DEFAULT 0,
+                sent_count INTEGER NOT NULL DEFAULT 0,
+                error_summary TEXT NOT NULL DEFAULT '',
+                operator_reason TEXT NOT NULL DEFAULT '',
+                resolution_note TEXT NOT NULL DEFAULT '',
+                started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                resolved_at TIMESTAMP,
+                UNIQUE(cookie_id, order_id, trigger_name),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            ''')
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_auto_delivery_runs_user_status
+            ON auto_delivery_runs(user_id, status, updated_at DESC)
             ''')
 
             cursor.execute('''
@@ -855,6 +953,28 @@ class DBManager:
             )
             ''')
 
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notification_delivery_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cookie_id TEXT NOT NULL,
+                rule_id INTEGER,
+                channel_id INTEGER,
+                event_type TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'runtime',
+                request_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL CHECK (status IN ('success', 'failed', 'unknown')),
+                error_code TEXT NOT NULL DEFAULT '',
+                error_summary TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            ''')
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_notification_delivery_logs_owner_time
+            ON notification_delivery_logs(user_id, created_at DESC)
+            ''')
+
             # 创建用户设置表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_settings (
@@ -985,6 +1105,8 @@ class DBManager:
             # 执行数据库迁移
             self._migrate_database(cursor)
 
+            self._migrate_sensitive_values(cursor)
+
             self.conn.commit()
             logger.info("数据库初始化完成")
         except Exception as e:
@@ -992,9 +1114,68 @@ class DBManager:
             self.conn.rollback()
             raise
 
+    def _migrate_sensitive_values(self, cursor) -> None:
+        secret_columns = (
+            ("cookies", "id", "value"),
+            ("cookies", "id", "password"),
+            ("ai_reply_settings", "cookie_id", "api_key"),
+            ("notification_channels", "id", "config"),
+        )
+        has_encrypted_value = False
+        for table, key_column, secret_column in secret_columns:
+            cursor.execute(
+                f"SELECT {key_column}, {secret_column} FROM {table} "
+                f"WHERE {secret_column} IS NOT NULL AND {secret_column} != ''"
+            )
+            rows = cursor.fetchall()
+            for key, raw_value in rows:
+                clear_value = decrypt_secret(raw_value)
+                has_encrypted_value |= clear_value != raw_value
+                if encryption_enabled() and clear_value == raw_value:
+                    encoded_value = encrypt_secret(clear_value)
+                    cursor.execute(
+                        f"UPDATE {table} SET {secret_column} = ? WHERE {key_column} = ?",
+                        (encoded_value, key),
+                    )
+
+        for setting_key in ("smtp_password", "qq_reply_secret_key"):
+            cursor.execute(
+                "SELECT value FROM system_settings WHERE key = ?",
+                (setting_key,),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                continue
+            clear_value = decrypt_secret(row[0])
+            has_encrypted_value |= clear_value != row[0]
+            if encryption_enabled() and clear_value == row[0]:
+                cursor.execute(
+                    "UPDATE system_settings SET value = ? WHERE key = ?",
+                    (encrypt_secret(clear_value), setting_key),
+                )
+
+        if not encryption_enabled() and not has_encrypted_value:
+            logger.warning(
+                "APP_ENCRYPTION_KEY is unset; stored account and integration secrets remain unencrypted"
+            )
+
     def _migrate_database(self, cursor):
         """执行数据库迁移"""
         try:
+            cursor.execute("PRAGMA table_info(auto_delivery_runs)")
+            auto_delivery_columns = {column[1] for column in cursor.fetchall()}
+            if auto_delivery_columns:
+                for column, definition in (
+                    ("attempt_count", "INTEGER NOT NULL DEFAULT 1"),
+                    ("operator_reason", "TEXT NOT NULL DEFAULT ''"),
+                    ("resolution_note", "TEXT NOT NULL DEFAULT ''"),
+                    ("resolved_at", "TIMESTAMP"),
+                ):
+                    if column not in auto_delivery_columns:
+                        cursor.execute(
+                            f"ALTER TABLE auto_delivery_runs ADD COLUMN {column} {definition}"
+                        )
+
             # 检查cards表是否存在image_url列
             cursor.execute("PRAGMA table_info(cards)")
             columns = [column[1] for column in cursor.fetchall()]
@@ -1179,21 +1360,21 @@ class DBManager:
                 logger.info("数据库升级到版本1.0完成")
             
             # 如果版本低于需要升级的版本，执行升级
-            if current_version < "1.1":
+            if self._version_parts(current_version) < (1, 1):
                 logger.info("开始升级数据库到版本1.1...")
                 self.upgrade_notification_channels_table(cursor)
                 self.set_system_setting("db_version", "1.1", "数据库版本号")
                 logger.info("数据库升级到版本1.1完成")
 
             # 升级到版本1.2 - 支持更多通知渠道类型
-            if current_version < "1.2":
+            if self._version_parts(current_version) < (1, 2):
                 logger.info("开始升级数据库到版本1.2...")
                 self.upgrade_notification_channels_types(cursor)
                 self.set_system_setting("db_version", "1.2", "数据库版本号")
                 logger.info("数据库升级到版本1.2完成")
 
             # 升级到版本1.3 - 添加关键词类型和图片URL字段
-            if current_version < "1.3":
+            if self._version_parts(current_version) < (1, 3):
                 logger.info("开始升级数据库到版本1.3...")
                 self.upgrade_keywords_table_for_image_support(cursor)
                 self.set_system_setting("db_version", "1.3", "数据库版本号")
@@ -1201,32 +1382,43 @@ class DBManager:
             
             
             # 升级到版本1.4 - 添加关键词类型和图片URL字段
-            if current_version < "1.4":
+            if self._version_parts(current_version) < (1, 4):
                 logger.info("开始升级数据库到版本1.4...")
                 self.upgrade_notification_channels_types(cursor)
                 self.set_system_setting("db_version", "1.4", "数据库版本号")
                 logger.info("数据库升级到版本1.4完成")
 
             # 升级到版本1.5 - 为cookies表添加账号登录字段
-            if current_version < "1.5":
+            if self._version_parts(current_version) < (1, 5):
                 logger.info("开始升级数据库到版本1.5...")
                 self.upgrade_cookies_table_for_account_login(cursor)
                 self.set_system_setting("db_version", "1.5", "数据库版本号")
                 logger.info("数据库升级到版本1.5完成")
 
             # 升级到版本1.6 - 多数量订单默认按实际购买件数发货
-            if current_version < "1.6":
+            if self._version_parts(current_version) < (1, 6):
                 logger.info("开始升级数据库到版本1.6...")
                 self.upgrade_item_multi_quantity_default(cursor)
                 self.set_system_setting("db_version", "1.6", "数据库版本号")
                 logger.info("数据库升级到版本1.6完成")
 
             # 升级到版本1.7 - 消息通知绑定支持规则名和事件类型订阅
-            if current_version < "1.7":
+            if self._version_parts(current_version) < (1, 7):
                 logger.info("开始升级数据库到版本1.7...")
                 self.upgrade_message_notifications_rules(cursor)
                 self.set_system_setting("db_version", "1.7", "数据库版本号")
                 logger.info("数据库升级到版本1.7完成")
+
+            if self._version_parts(current_version) < (1, 8):
+                logger.info("开始升级数据库到版本1.8...")
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_notification_delivery_logs_status_time
+                    ON notification_delivery_logs(user_id, status, created_at DESC)
+                    """
+                )
+                self.set_system_setting("db_version", "1.8", "数据库版本号")
+                logger.info("数据库升级到版本1.8完成")
 
             # 迁移遗留数据（在所有版本升级完成后执行）
             self.migrate_legacy_data(cursor)
@@ -2045,6 +2237,36 @@ class DBManager:
         if self.conn:
             self.conn.close()
             self.conn = None
+
+    def backup_to(self, destination_path: str) -> None:
+        """Create a consistent SQLite snapshot, including uncheckpointed WAL data."""
+        with self.lock:
+            if self.conn is None:
+                raise RuntimeError("Database connection is closed")
+            if self.conn.in_transaction:
+                raise RuntimeError("Cannot back up while a database transaction is active")
+            destination = sqlite3.connect(destination_path)
+            try:
+                self.conn.backup(destination)
+            finally:
+                destination.close()
+
+    def restore_from_backup(self, source_path: str) -> None:
+        """Restore a SQLite snapshot into the live connection under the DB lock."""
+        with self.lock:
+            if self.conn is None:
+                raise RuntimeError("Database connection is closed")
+            if self.conn.in_transaction:
+                raise RuntimeError("Cannot restore while a database transaction is active")
+            source = sqlite3.connect(source_path)
+            try:
+                source.backup(self.conn)
+                self.conn.commit()
+                integrity = self.conn.execute("PRAGMA quick_check").fetchone()
+                if not integrity or integrity[0] != "ok":
+                    raise sqlite3.DatabaseError("Restored database integrity check failed")
+            finally:
+                source.close()
     
     def get_connection(self):
         """获取数据库连接，如果已关闭则重新连接"""
@@ -2135,7 +2357,7 @@ class DBManager:
 
                 self._execute_sql(cursor,
                     "INSERT OR REPLACE INTO cookies (id, value, user_id) VALUES (?, ?, ?)",
-                    (cookie_id, cookie_value, user_id)
+                    (cookie_id, encrypt_secret(cookie_value), user_id)
                 )
 
                 self.conn.commit()
@@ -2179,7 +2401,7 @@ class DBManager:
                 cursor = self.conn.cursor()
                 self._execute_sql(cursor, "SELECT value FROM cookies WHERE id = ?", (cookie_id,))
                 result = cursor.fetchone()
-                return result[0] if result else None
+                return decrypt_secret(result[0]) if result else None
             except Exception as e:
                 logger.error(f"获取Cookie失败: {e}")
                 return None
@@ -2193,7 +2415,7 @@ class DBManager:
                     self._execute_sql(cursor, "SELECT id, value FROM cookies WHERE user_id = ?", (user_id,))
                 else:
                     self._execute_sql(cursor, "SELECT id, value FROM cookies")
-                return {row[0]: row[1] for row in cursor.fetchall()}
+                return {row[0]: decrypt_secret(row[1]) for row in cursor.fetchall()}
             except Exception as e:
                 logger.error(f"获取所有Cookie失败: {e}")
                 return {}
@@ -2229,8 +2451,8 @@ class DBManager:
                 if result:
                     return {
                         'id': result[0],
-                        'cookies_str': result[1],  # 使用cookies_str字段名以匹配调用方期望
-                        'value': result[1],        # 保持向后兼容
+                        'cookies_str': decrypt_secret(result[1]),  # 使用cookies_str字段名以匹配调用方期望
+                        'value': decrypt_secret(result[1]),        # 保持向后兼容
                         'created_at': result[2]
                     }
                 return None
@@ -2259,13 +2481,13 @@ class DBManager:
                 if result:
                     return {
                         'id': result[0],
-                        'value': result[1],
+                        'value': decrypt_secret(result[1]),
                         'user_id': result[2],
                         'auto_confirm': bool(result[3]),
                         'remark': result[4] or '',
                         'pause_duration': result[5] if result[5] is not None else 10,  # 0是有效值，表示不暂停
                         'username': result[6] or '',
-                        'password': result[7] or '',
+                        'password': decrypt_secret(result[7] or ''),
                         'show_browser': bool(result[8]) if result[8] is not None else False,
                         'nickname': result[9] or '',
                         'avatar_url': result[10] or '',
@@ -2416,7 +2638,7 @@ class DBManager:
                     
                     # 构建插入语句
                     insert_fields = ['id', 'value', 'user_id']
-                    insert_values = [cookie_id, cookie_value, user_id]
+                    insert_values = [cookie_id, encrypt_secret(cookie_value), user_id]
                     insert_placeholders = ['?', '?', '?']
                     
                     if username is not None:
@@ -2426,7 +2648,7 @@ class DBManager:
                     
                     if password is not None:
                         insert_fields.append('password')
-                        insert_values.append(password)
+                        insert_values.append(encrypt_secret(password))
                         insert_placeholders.append('?')
                     
                     if show_browser is not None:
@@ -2447,7 +2669,7 @@ class DBManager:
                     
                     if cookie_value is not None:
                         update_fields.append("value = ?")
-                        params.append(cookie_value)
+                        params.append(encrypt_secret(cookie_value))
                     
                     if username is not None:
                         update_fields.append("username = ?")
@@ -2455,7 +2677,7 @@ class DBManager:
                     
                     if password is not None:
                         update_fields.append("password = ?")
-                        params.append(password)
+                        params.append(encrypt_secret(password))
                     
                     if show_browser is not None:
                         update_fields.append("show_browser = ?")
@@ -2840,7 +3062,7 @@ class DBManager:
                     cookie_id,
                     settings.get('ai_enabled', False),
                     settings.get('model_name', 'qwen-plus'),
-                    settings.get('api_key', ''),
+                    encrypt_secret(settings.get('api_key', '')),
                     settings.get('base_url', 'https://ai.corleom.com/v1'),
                     settings.get('user_agent', ''),
                     settings.get('max_discount_percent', 10),
@@ -2889,7 +3111,7 @@ class DBManager:
                     return {
                         'ai_enabled': bool(result[0]),
                         'model_name': result[1] or DEFAULT_MODEL,
-                        'api_key': result[2] or '',
+                        'api_key': decrypt_secret(result[2] or ''),
                         'base_url': result[3] or DEFAULT_BASE_URL,
                         'user_agent': result[4] or '',
                         'max_discount_percent': result[5],
@@ -2942,7 +3164,7 @@ class DBManager:
                     (cookie_id,),
                 )
                 row = cursor.fetchone()
-                return (row[0] or '') if row else ''
+                return decrypt_secret(row[0] or '') if row else ''
             except Exception as e:
                 logger.error(f"获取账号AI API Key失败: {e}")
                 return ''
@@ -2966,7 +3188,7 @@ class DBManager:
                     result[cookie_id] = {
                         'ai_enabled': bool(row[1]),
                         'model_name': row[2],
-                        'api_key': row[3],
+                        'api_key': decrypt_secret(row[3] or ''),
                         'base_url': row[4],
                         'user_agent': row[5] or '',
                         'max_discount_percent': row[6],
@@ -3140,7 +3362,7 @@ class DBManager:
                 cursor.execute('''
                 INSERT INTO notification_channels (name, type, config, user_id)
                 VALUES (?, ?, ?, ?)
-                ''', (name, channel_type, config, user_id))
+                ''', (name, channel_type, encrypt_secret(config), user_id))
                 self.conn.commit()
                 channel_id = cursor.lastrowid
                 logger.debug(f"创建通知渠道: {name} (ID: {channel_id})")
@@ -3175,7 +3397,7 @@ class DBManager:
                         'id': row[0],
                         'name': row[1],
                         'type': row[2],
-                        'config': row[3],
+                        'config': decrypt_secret(row[3]),
                         'enabled': bool(row[4]),
                         'created_at': row[5],
                         'updated_at': row[6]
@@ -3208,7 +3430,7 @@ class DBManager:
                         'id': row[0],
                         'name': row[1],
                         'type': row[2],
-                        'config': row[3],
+                        'config': decrypt_secret(row[3]),
                         'enabled': bool(row[4]),
                         'created_at': row[5],
                         'updated_at': row[6]
@@ -3229,13 +3451,13 @@ class DBManager:
                     UPDATE notification_channels
                     SET name = ?, config = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ? AND user_id = ?
-                    ''', (name, config, enabled, channel_id, user_id))
+                    ''', (name, encrypt_secret(config), enabled, channel_id, user_id))
                 else:
                     cursor.execute('''
                     UPDATE notification_channels
                     SET name = ?, config = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                    ''', (name, config, enabled, channel_id))
+                    ''', (name, encrypt_secret(config), enabled, channel_id))
                 self.conn.commit()
                 logger.debug(f"更新通知渠道: {channel_id}")
                 return cursor.rowcount > 0
@@ -3416,7 +3638,7 @@ class DBManager:
                     "enabled": bool(row[5]),
                     "channel_name": row[6],
                     "channel_type": row[7],
-                    "channel_config": row[8],
+                    "channel_config": decrypt_secret(row[8]),
                     "channel_enabled": bool(row[9]),
                     "account_user_id": row[10],
                     "channel_user_id": row[11],
@@ -3424,6 +3646,288 @@ class DBManager:
             except Exception as e:
                 logger.error(f"获取通知测试目标失败: {e}")
                 return None
+
+    def add_notification_delivery_log(
+        self,
+        cookie_id: str,
+        channel_id: int,
+        status: str,
+        *,
+        rule_id: Optional[int] = None,
+        event_type: str = "",
+        source: str = "runtime",
+        request_id: str = "",
+        error_code: str = "",
+        error_summary: str = "",
+    ) -> int:
+        if status not in {"success", "failed", "unknown"}:
+            raise ValueError(f"Unsupported notification delivery status: {status}")
+        if source not in {"runtime", "test"}:
+            raise ValueError(f"Unsupported notification delivery source: {source}")
+        safe_error = self._sanitize_delivery_audit_text(error_summary)
+        safe_code = re.sub(r"[^a-zA-Z0-9_.-]", "", str(error_code or ""))[:80]
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO notification_delivery_logs (
+                    user_id, cookie_id, rule_id, channel_id, event_type, source,
+                    request_id, status, error_code, error_summary
+                )
+                SELECT c.user_id, c.id, ?, ?, ?, ?, ?, ?, ?, ?
+                FROM cookies c
+                WHERE c.id = ?
+                  AND EXISTS (
+                      SELECT 1 FROM notification_channels nc
+                      WHERE nc.id = ? AND nc.user_id = c.user_id
+                  )
+                """,
+                (
+                    rule_id, channel_id, event_type or "", source, request_id or "",
+                    status, safe_code, safe_error, cookie_id, channel_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self.conn.rollback()
+                raise ValueError("Notification account or channel ownership mismatch")
+            log_id = cursor.lastrowid
+            self.conn.commit()
+            return log_id
+
+    def get_notification_delivery_logs(
+        self,
+        user_id: int,
+        *,
+        cookie_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if status and status not in {"success", "failed", "unknown"}:
+            raise ValueError(f"Unsupported notification delivery status: {status}")
+        clauses = ["l.user_id = ?"]
+        params: List[Any] = [user_id]
+        if cookie_id:
+            clauses.append("l.cookie_id = ?")
+            params.append(cookie_id)
+        if status:
+            clauses.append("l.status = ?")
+            params.append(status)
+        params.append(max(1, min(int(limit), 500)))
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT l.id, l.cookie_id, l.rule_id, l.channel_id, l.event_type,
+                       l.source, l.request_id, l.status, l.error_code,
+                       l.error_summary, l.created_at, nc.name AS channel_name
+                FROM notification_delivery_logs l
+                LEFT JOIN notification_channels nc ON nc.id = l.channel_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY l.id DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def get_operational_summary(self, user_id: int, days: int = 7) -> Dict[str, Any]:
+        days = max(1, min(int(days), 30))
+        with self.lock:
+            cursor = self.conn.cursor()
+            delivery_counts = {
+                row[0]: row[1]
+                for row in cursor.execute(
+                    """
+                    SELECT status, COUNT(*)
+                    FROM auto_delivery_runs
+                    WHERE user_id = ?
+                      AND updated_at >= datetime('now', ?)
+                    GROUP BY status
+                    """,
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+            }
+            notification_counts = {
+                row[0]: row[1]
+                for row in cursor.execute(
+                    """
+                    SELECT status, COUNT(*)
+                    FROM notification_delivery_logs
+                    WHERE user_id = ?
+                      AND created_at >= datetime('now', ?)
+                    GROUP BY status
+                    """,
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+            }
+            automation = cursor.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(CASE WHEN failed_count > 0 THEN 1 ELSE 0 END), 0)
+                FROM automation_task_runs
+                WHERE user_id = ? AND created_at >= datetime('now', ?)
+                """,
+                (user_id, f"-{days} days"),
+            ).fetchone()
+            ai_decisions = cursor.execute(
+                """
+                SELECT COUNT(*),
+                       COALESCE(SUM(CASE
+                           WHEN process_status = 'failed' OR send_status = 'failed'
+                           THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN send_status = 'unknown' THEN 1 ELSE 0 END), 0)
+                FROM auto_reply_message_logs
+                WHERE cookie_id IN (SELECT id FROM cookies WHERE user_id = ?)
+                  AND created_at >= datetime('now', ?)
+                """,
+                (user_id, f"-{days} days"),
+            ).fetchone()
+
+            recent = []
+            recent.extend(
+                {
+                    "kind": "delivery",
+                    "record_id": row[0],
+                    "cookie_id": row[1],
+                    "reference": row[2],
+                    "status": row[3],
+                    "event": row[4],
+                    "summary": row[5],
+                    "updated_at": row[6],
+                }
+                for row in cursor.execute(
+                    """
+                    SELECT id, cookie_id, order_id, status, trigger_name,
+                           error_summary, updated_at
+                    FROM auto_delivery_runs
+                    WHERE user_id = ? AND updated_at >= datetime('now', ?)
+                    ORDER BY updated_at DESC, id DESC LIMIT 5
+                    """,
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+            )
+            recent.extend(
+                {
+                    "kind": "notification",
+                    "record_id": row[0],
+                    "cookie_id": row[1],
+                    "reference": row[3] or row[2] or f"channel-{row[4] or 'unknown'}",
+                    "status": row[5],
+                    "event": row[3] or row[2] or "通知投递",
+                    "summary": row[6],
+                    "updated_at": row[7],
+                }
+                for row in cursor.execute(
+                    """
+                    SELECT id, cookie_id, source, event_type, channel_id,
+                           status, error_summary, created_at
+                    FROM notification_delivery_logs
+                    WHERE user_id = ? AND created_at >= datetime('now', ?)
+                    ORDER BY created_at DESC, id DESC LIMIT 5
+                    """,
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+            )
+            recent.extend(
+                {
+                    "kind": "automation",
+                    "record_id": row[0],
+                    "cookie_id": row[1] or "",
+                    "reference": row[2],
+                    "status": "failed" if row[4] else "success",
+                    "event": row[2],
+                    "summary": row[3],
+                    "updated_at": row[5],
+                }
+                for row in cursor.execute(
+                    """
+                    SELECT id, cookie_id, task_type, summary, failed_count, created_at
+                    FROM automation_task_runs
+                    WHERE user_id = ? AND created_at >= datetime('now', ?)
+                    ORDER BY created_at DESC, id DESC LIMIT 5
+                    """,
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+            )
+            recent.extend(
+                {
+                    "kind": "ai_reply",
+                    "record_id": row[0],
+                    "cookie_id": row[1],
+                    "reference": row[2] or "",
+                    "status": (
+                        "failed" if row[3] == "failed" or row[4] == "failed"
+                        else "unknown" if row[4] == "unknown"
+                        else "success"
+                    ),
+                    "event": row[5] or "AI 回复决策",
+                    "summary": row[6] or "",
+                    "updated_at": row[7],
+                }
+                for row in cursor.execute(
+                    """
+                    SELECT id, cookie_id, item_id, process_status, send_status,
+                           reply_strategy, decision_reason, created_at
+                    FROM auto_reply_message_logs
+                    WHERE cookie_id IN (SELECT id FROM cookies WHERE user_id = ?)
+                      AND created_at >= datetime('now', ?)
+                    ORDER BY created_at DESC, id DESC LIMIT 5
+                    """,
+                    (user_id, f"-{days} days"),
+                ).fetchall()
+            )
+            recent.sort(key=lambda row: (row["updated_at"] or "", row["record_id"]), reverse=True)
+            return {
+                "period_days": days,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "delivery_runs": {
+                    "completed": delivery_counts.get("completed", 0),
+                    "failed": delivery_counts.get("failed", 0),
+                    "needs_review": delivery_counts.get("needs_review", 0),
+                    "processing": delivery_counts.get("processing", 0),
+                },
+                "notification_deliveries": {
+                    "success": notification_counts.get("success", 0),
+                    "failed": notification_counts.get("failed", 0),
+                    "unknown": notification_counts.get("unknown", 0),
+                },
+                "automation_runs": {
+                    "total": automation[0],
+                    "failed": automation[1],
+                },
+                "ai_replies": {
+                    "total": ai_decisions[0],
+                    "failed": ai_decisions[1],
+                    "uncertain": ai_decisions[2],
+                },
+                "recent_records": recent[:10],
+            }
+
+    def update_notification_delivery_log(
+        self,
+        log_id: int,
+        user_id: int,
+        status: str,
+        *,
+        error_code: str = "",
+        error_summary: str = "",
+    ) -> bool:
+        if status not in {"success", "failed", "unknown"}:
+            raise ValueError(f"Unsupported notification delivery status: {status}")
+        safe_error = self._sanitize_delivery_audit_text(error_summary)
+        safe_code = re.sub(r"[^a-zA-Z0-9_.-]", "", str(error_code or ""))[:80]
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                UPDATE notification_delivery_logs
+                SET status = ?, error_code = ?, error_summary = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (status, safe_code, safe_error, log_id, user_id),
+            )
+            self.conn.commit()
+            return cursor.rowcount == 1
 
     def update_notification_rule(self, rule_id: int, name: str = None, event_types=None,
                                  enabled: bool = True, user_id: int = None) -> bool:
@@ -3491,7 +3995,7 @@ class DBManager:
                         'enabled': bool(row[2]),
                         'channel_name': row[3],
                         'channel_type': row[4],
-                        'channel_config': row[5],
+                        'channel_config': decrypt_secret(row[5]),
                         'name': row[6],
                         'event_types': rule_event_types,
                     })
@@ -3536,7 +4040,7 @@ class DBManager:
                         'enabled': bool(row[3]),
                         'channel_name': row[4],
                         'channel_type': row[5],
-                        'channel_config': row[6],
+                        'channel_config': decrypt_secret(row[6]),
                         'name': row[7],
                         'event_types': parse_event_types(row[8]),
                         'channel_enabled': bool(row[9]),
@@ -4008,7 +4512,10 @@ class DBManager:
                 cursor = self.conn.cursor()
                 self._execute_sql(cursor, "SELECT value FROM system_settings WHERE key = ?", (key,))
                 result = cursor.fetchone()
-                return result[0] if result else None
+                value = result[0] if result else None
+                if key in {"smtp_password", "qq_reply_secret_key"}:
+                    return decrypt_secret(value)
+                return value
             except Exception as e:
                 logger.error(f"获取系统设置失败: {e}")
                 return None
@@ -4021,7 +4528,11 @@ class DBManager:
                 cursor.execute('''
                 INSERT OR REPLACE INTO system_settings (key, value, description, updated_at)
                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (key, value, description))
+                ''', (
+                    key,
+                    encrypt_secret(value) if key in {"smtp_password", "qq_reply_secret_key"} else value,
+                    description,
+                ))
                 self.conn.commit()
                 logger.debug(f"设置系统设置: {key}")
                 return True
@@ -4039,7 +4550,11 @@ class DBManager:
 
                 settings = {}
                 for row in cursor.fetchall():
-                    settings[row[0]] = row[1]
+                    settings[row[0]] = (
+                        decrypt_secret(row[1])
+                        if row[0] in {"smtp_password", "qq_reply_secret_key"}
+                        else row[1]
+                    )
 
                 return settings
             except Exception as e:
@@ -5465,6 +5980,7 @@ class DBManager:
         with self.lock:
             try:
                 cursor = self.conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
 
                 # 获取卡券的批量数据
                 self._execute_sql(cursor, "SELECT data_content, name, user_id FROM cards WHERE id = ? AND type = 'data'", (card_id,))
@@ -5472,6 +5988,7 @@ class DBManager:
 
                 if not result or not result[0]:
                     logger.warning(f"卡券 {card_id} 没有批量数据")
+                    self.conn.rollback()
                     return None
 
                 data_content = result[0]
@@ -5481,6 +5998,7 @@ class DBManager:
 
                 if not lines:
                     logger.warning(f"卡券 {card_id} 批量数据为空")
+                    self.conn.rollback()
                     return None
 
                 if len(lines) < requested_quantity:
@@ -5488,6 +6006,7 @@ class DBManager:
                         f"卡券 {card_id} 批量数据不足: "
                         f"需要={requested_quantity}条, 可用={len(lines)}条，未扣减库存"
                     )
+                    self.conn.rollback()
                     return None
 
                 consumed_lines = lines[:requested_quantity]
@@ -5592,6 +6111,278 @@ class DBManager:
                 logger.error(f"清空已发货卡密记录失败: {e}")
                 self.conn.rollback()
                 return 0
+
+    def claim_auto_delivery_run(
+        self,
+        cookie_id: str,
+        order_id: str,
+        item_id: str = "",
+        buyer_id: str = "",
+        chat_id: str = "",
+        trigger_name: str = "paid_delivery",
+        operator_reason: str = "",
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Durably claim one account/order automation event exactly once.
+
+        Existing runs are never silently reclaimed: a process may have stopped
+        after sending buyer-facing content, so an operator must reconcile them.
+        """
+        if not cookie_id or not order_id or not trigger_name:
+            raise ValueError("cookie_id, order_id and trigger_name are required")
+
+        run_columns = (
+            "id", "user_id", "cookie_id", "order_id", "trigger_name", "item_id",
+            "buyer_id", "chat_id", "status", "current_step", "attempt_count", "expected_count",
+            "acquired_count", "sent_count", "error_summary", "operator_reason", "resolution_note",
+            "started_at", "updated_at", "completed_at", "resolved_at",
+        )
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute("SELECT user_id FROM cookies WHERE id = ?", (cookie_id,))
+                owner = cursor.fetchone()
+                if not owner:
+                    raise ValueError(f"Unknown account: {cookie_id}")
+
+                cursor.execute(
+                    """
+                    SELECT id, user_id, cookie_id, order_id, trigger_name, item_id,
+                           buyer_id, chat_id, status, current_step, attempt_count, expected_count,
+                           acquired_count, sent_count, error_summary, operator_reason, resolution_note,
+                           started_at, updated_at, completed_at, resolved_at
+                    FROM auto_delivery_runs
+                    WHERE cookie_id = ? AND order_id = ? AND trigger_name != ?
+                      AND (
+                          status IN ('processing', 'completed', 'needs_review')
+                          OR acquired_count > 0 OR sent_count > 0
+                      )
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (cookie_id, order_id, trigger_name),
+                )
+                prior_action = cursor.fetchone()
+                if prior_action:
+                    self.conn.commit()
+                    return False, dict(zip(run_columns, prior_action))
+
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO auto_delivery_runs (
+                        user_id, cookie_id, order_id, trigger_name, item_id,
+                        buyer_id, chat_id, status, current_step, operator_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'processing', 'claimed', ?)
+                    """,
+                    (
+                        owner[0],
+                        cookie_id,
+                        order_id,
+                        trigger_name,
+                        item_id or "",
+                        buyer_id or "",
+                        chat_id or "",
+                        self._sanitize_delivery_audit_text(operator_reason),
+                    ),
+                )
+                claimed = cursor.rowcount == 1
+                if not claimed:
+                    cursor.execute(
+                        """
+                        UPDATE auto_delivery_runs
+                        SET status = 'processing',
+                            current_step = 'safe_retry_claimed',
+                            attempt_count = attempt_count + 1,
+                            error_summary = '',
+                            operator_reason = ?,
+                            started_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP,
+                            completed_at = NULL
+                        WHERE cookie_id = ? AND order_id = ? AND trigger_name = ?
+                          AND status = 'failed'
+                          AND acquired_count = 0 AND sent_count = 0
+                          AND attempt_count < ?
+                          AND resolved_at IS NULL
+                        """,
+                        (
+                            self._sanitize_delivery_audit_text(operator_reason),
+                            cookie_id,
+                            order_id,
+                            trigger_name,
+                            self.MAX_SAFE_DELIVERY_ATTEMPTS,
+                        ),
+                    )
+                    claimed = cursor.rowcount == 1
+                cursor.execute(
+                    """
+                    SELECT id, user_id, cookie_id, order_id, trigger_name, item_id,
+                           buyer_id, chat_id, status, current_step, attempt_count, expected_count,
+                            acquired_count, sent_count, error_summary, operator_reason, resolution_note,
+                            started_at, updated_at, completed_at, resolved_at
+                    FROM auto_delivery_runs
+                    WHERE cookie_id = ? AND order_id = ? AND trigger_name = ?
+                    """,
+                    (cookie_id, order_id, trigger_name),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("Delivery run claim was not persisted")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+        return claimed, dict(zip(run_columns, row))
+
+    @staticmethod
+    def _sanitize_delivery_audit_text(value: str) -> str:
+        from utils.log_sanitizer import redact_sensitive_text
+        return redact_sensitive_text(str(value or ""))[:1000]
+
+    def update_auto_delivery_run(
+        self,
+        run_id: int,
+        status: str,
+        current_step: Optional[str] = None,
+        expected_count: Optional[int] = None,
+        acquired_count: Optional[int] = None,
+        sent_count: Optional[int] = None,
+        error_summary: Optional[str] = None,
+    ) -> bool:
+        """Persist an automation checkpoint without storing delivery contents."""
+        allowed_statuses = {"processing", "completed", "failed", "needs_review"}
+        if status not in allowed_statuses:
+            raise ValueError(f"Unsupported delivery run status: {status}")
+
+        updates = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        params: List[Any] = [status]
+        for column, value in (
+            ("current_step", current_step),
+            ("expected_count", expected_count),
+            ("acquired_count", acquired_count),
+            ("sent_count", sent_count),
+            ("error_summary", error_summary),
+        ):
+            if value is not None:
+                updates.append(f"{column} = ?")
+                if column == "error_summary":
+                    params.append(self._sanitize_delivery_audit_text(value))
+                else:
+                    params.append(value)
+        if status in {"completed", "failed", "needs_review"}:
+            updates.append("completed_at = CURRENT_TIMESTAMP")
+        else:
+            updates.append("completed_at = NULL")
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute(
+                    f"UPDATE auto_delivery_runs SET {', '.join(updates)} WHERE id = ?",
+                    (*params, run_id),
+                )
+                changed = cursor.rowcount == 1
+                self.conn.commit()
+                return changed
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def get_auto_delivery_runs(
+        self,
+        user_id: int,
+        cookie_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        page_size = max(1, min(int(limit), 500))
+        clauses = ["user_id = ?"]
+        params: List[Any] = [user_id]
+        if cookie_id:
+            clauses.append("cookie_id = ?")
+            params.append(cookie_id)
+        if status:
+            if status not in {"processing", "completed", "failed", "needs_review"}:
+                raise ValueError(f"Unsupported delivery run status: {status}")
+            clauses.append("status = ?")
+            params.append(status)
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT id, cookie_id, order_id, trigger_name, item_id, buyer_id,
+                       chat_id, status, current_step, attempt_count, expected_count, acquired_count,
+                       sent_count, error_summary, operator_reason, resolution_note, started_at, updated_at,
+                       completed_at, resolved_at
+                FROM auto_delivery_runs
+                WHERE {' AND '.join(clauses)}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (*params, page_size),
+            )
+            keys = (
+                "id", "cookie_id", "order_id", "trigger_name", "item_id", "buyer_id",
+                "chat_id", "status", "current_step", "attempt_count", "expected_count", "acquired_count",
+                "sent_count", "error_summary", "operator_reason", "resolution_note", "started_at", "updated_at",
+                "completed_at", "resolved_at",
+            )
+            return [dict(zip(keys, row)) for row in cursor.fetchall()]
+
+    def resolve_auto_delivery_run(self, run_id: int, user_id: int, note: str) -> bool:
+        """Close an uncertain delivery run after an operator records reconciliation."""
+        sanitized_note = self._sanitize_delivery_audit_text(note).strip()
+        if not sanitized_note:
+            raise ValueError("A reconciliation note is required")
+
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                UPDATE auto_delivery_runs
+                SET resolution_note = ?, resolved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ?
+                  AND (
+                      status IN ('failed', 'needs_review')
+                      OR (
+                          status = 'processing'
+                          AND updated_at <= datetime('now', '-30 minutes')
+                      )
+                  )
+                  AND resolved_at IS NULL
+                """,
+                (sanitized_note, run_id, user_id),
+            )
+            changed = cursor.rowcount == 1
+            self.conn.commit()
+            return changed
+
+    def get_auto_delivery_run(self, run_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, cookie_id, order_id, trigger_name, item_id, buyer_id,
+                       chat_id, status, current_step, attempt_count, expected_count,
+                       acquired_count, sent_count, error_summary, operator_reason,
+                       resolution_note, started_at, updated_at, completed_at, resolved_at
+                FROM auto_delivery_runs
+                WHERE id = ? AND user_id = ?
+                """,
+                (run_id, user_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            keys = (
+                "id", "cookie_id", "order_id", "trigger_name", "item_id", "buyer_id",
+                "chat_id", "status", "current_step", "attempt_count", "expected_count",
+                "acquired_count", "sent_count", "error_summary", "operator_reason",
+                "resolution_note", "started_at", "updated_at", "completed_at", "resolved_at",
+            )
+            return dict(zip(keys, row))
 
     # ==================== 商品信息管理 ====================
 

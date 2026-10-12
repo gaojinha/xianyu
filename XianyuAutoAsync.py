@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import time
+import secrets
 import base64
 import os
 import random
@@ -1718,6 +1719,7 @@ class XianyuLive:
     async def _handle_auto_delivery(self, websocket, message: dict, send_user_name: str, send_user_id: str,
                                    item_id: str, chat_id: str, msg_time: str):
         """统一处理自动发货逻辑"""
+        delivery_run_id = None
         try:
             # 检查商品是否属于当前cookies
             if item_id and item_id != "未知商品":
@@ -1807,6 +1809,22 @@ class XianyuLive:
                     logger.info(f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 在获取锁后检查发现仍在冷却期，跳过发货')
                     return
 
+                claimed, delivery_run = db_manager.claim_auto_delivery_run(
+                    cookie_id=self.cookie_id,
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=send_user_id,
+                    chat_id=chat_id,
+                )
+                if not claimed:
+                    logger.warning(
+                        f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 已有持久化发货记录 '
+                        f'(状态: {delivery_run["status"]}, 步骤: {delivery_run["current_step"]})，'
+                        "为避免重复发送，转人工核对"
+                    )
+                    return
+                delivery_run_id = delivery_run["id"]
+
                 protection_result = await self.apply_delivery_block_rules(
                     order_id=order_id,
                     buyer_id=send_user_id,
@@ -1815,12 +1833,24 @@ class XianyuLive:
                     websocket=websocket,
                 )
                 if protection_result["action"] == "block":
+                    db_manager.update_auto_delivery_run(
+                        delivery_run_id,
+                        status="failed",
+                        current_step="blocked_by_delivery_rule",
+                        error_summary=protection_result["reason"],
+                    )
                     logger.warning(
                         f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} 已停止自动发货: '
                         f'{protection_result["reason"]}'
                     )
                     return
                 card_only_delivery = protection_result["action"] == "card_only"
+
+                db_manager.update_auto_delivery_run(
+                    delivery_run_id,
+                    status="processing",
+                    current_step="resolving_inventory",
+                )
 
                 # 构造用户URL
                 user_url = f'https://www.goofish.com/personal?userId={send_user_id}'
@@ -1893,8 +1923,29 @@ class XianyuLive:
                             f"{max(1, quantity_to_send // per_item_delivery_count)}, "
                             f"每件发货={per_item_delivery_count}，合计={quantity_to_send}"
                         )
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="processing",
+                            current_step="content_acquired",
+                            expected_count=quantity_to_send,
+                            acquired_count=max(
+                                len(delivery_contents),
+                                int(delivery_context.get("batch_data_required_count") or 0),
+                            ),
+                        )
                     else:
                         logger.warning("第 1 个卡券内容获取失败，停止本次自动发货")
+                        consumed_count = int(
+                            delivery_context.get("batch_data_required_count") or 0
+                        )
+                        if consumed_count:
+                            db_manager.update_auto_delivery_run(
+                                delivery_run_id,
+                                status="processing",
+                                current_step="inventory_consumed_content_unavailable",
+                                expected_count=consumed_count,
+                                acquired_count=consumed_count,
+                            )
 
                     for i in range(1, quantity_to_send):
                         if not delivery_contents:
@@ -1911,6 +1962,17 @@ class XianyuLive:
                             )
                             if delivery_content:
                                 delivery_contents.append(delivery_content)
+                                acquired_count = max(
+                                    len(delivery_contents),
+                                    int(delivery_context.get("batch_data_required_count") or 0),
+                                )
+                                db_manager.update_auto_delivery_run(
+                                    delivery_run_id,
+                                    status="processing",
+                                    current_step="content_acquired",
+                                    expected_count=quantity_to_send,
+                                    acquired_count=acquired_count,
+                                )
                                 if quantity_to_send > 1:
                                     logger.info(f"第 {i+1}/{quantity_to_send} 个卡券内容获取成功")
                             else:
@@ -1919,6 +1981,16 @@ class XianyuLive:
                             logger.error(f"第 {i+1}/{quantity_to_send} 个卡券获取异常: {self._safe_str(e)}")
 
                     if delivery_contents:
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="processing",
+                            current_step="sending_content",
+                            expected_count=quantity_to_send,
+                            acquired_count=max(
+                                len(delivery_contents),
+                                int(delivery_context.get("batch_data_required_count") or 0),
+                            ),
+                        )
                         # 标记锁为持有状态，并启动延迟释放任务
                         self._lock_hold_info[lock_key] = {
                             'locked': True,
@@ -1935,6 +2007,7 @@ class XianyuLive:
                         sent_count = 0
                         send_errors = []
                         for i, delivery_content in enumerate(delivery_contents):
+                            send_succeeded = False
                             try:
                                 # 检查是否是图片发送标记
                                 if delivery_content.startswith("__IMAGE_SEND__"):
@@ -1976,10 +2049,24 @@ class XianyuLive:
                                         await asyncio.sleep(1)
 
                                 sent_count += 1
+                                send_succeeded = True
                             except Exception as e:
                                 error_message = self._safe_str(e)
                                 send_errors.append(f"第{i + 1}条: {error_message}")
                                 logger.error(f"发送第 {i+1} 条消息失败: {error_message}")
+
+                            if send_succeeded:
+                                db_manager.update_auto_delivery_run(
+                                    delivery_run_id,
+                                    status="processing",
+                                    current_step="sending_content",
+                                    expected_count=quantity_to_send,
+                                    acquired_count=max(
+                                        len(delivery_contents),
+                                        int(delivery_context.get("batch_data_required_count") or 0),
+                                    ),
+                                    sent_count=sent_count,
+                                )
 
                         acquired_all = len(delivery_contents) == quantity_to_send
                         sent_all = sent_count == len(delivery_contents)
@@ -2002,6 +2089,7 @@ class XianyuLive:
 
                             # 卡券全部发送后才记录系统已发货；订单状态只在闲鱼确认成功后推进。
                             self.mark_delivery_sent(order_id, update_order_status=platform_confirmed)
+                            order_state_error = None
                             try:
                                 db_manager.insert_or_update_order(
                                     order_id=order_id,
@@ -2010,7 +2098,37 @@ class XianyuLive:
                                 )
                                 logger.info(f'【{self.cookie_id}】订单 {order_id} 已标记为系统已发货 (system_shipped=1)')
                             except Exception as db_e:
+                                order_state_error = self._safe_str(db_e)
                                 logger.error(f'【{self.cookie_id}】更新订单system_shipped状态失败: {self._safe_str(db_e)}')
+
+                            run_status = (
+                                "needs_review"
+                                if (confirm_required and not platform_confirmed)
+                                or order_state_error
+                                else "completed"
+                            )
+                            run_error = (
+                                f"卡券已发送，但闲鱼确认发货失败：{confirm_error}"
+                                if confirm_required and not platform_confirmed
+                                else (
+                                    f"卡券已发送，但本地订单状态更新失败：{order_state_error}"
+                                    if order_state_error
+                                    else ""
+                                )
+                            )
+                            db_manager.update_auto_delivery_run(
+                                delivery_run_id,
+                                status=run_status,
+                                current_step=(
+                                    "needs_reconciliation"
+                                    if run_status == "needs_review"
+                                    else "completed"
+                                ),
+                                expected_count=quantity_to_send,
+                                acquired_count=len(delivery_contents),
+                                sent_count=sent_count,
+                                error_summary=run_error,
+                            )
 
                             if card_only_delivery:
                                 await self.send_delivery_failure_notification(
@@ -2042,6 +2160,15 @@ class XianyuLive:
                             )
                             if send_errors:
                                 failure_detail += f"；发送错误：{'；'.join(send_errors)}"
+                            db_manager.update_auto_delivery_run(
+                                delivery_run_id,
+                                status="needs_review",
+                                current_step="partial_delivery",
+                                expected_count=quantity_to_send,
+                                acquired_count=len(delivery_contents),
+                                sent_count=sent_count,
+                                error_summary=failure_detail,
+                            )
                             logger.error(f"【{self.cookie_id}】订单 {order_id} 自动发货未完整完成：{failure_detail}")
                             await self.send_delivery_failure_notification(
                                 send_user_name,
@@ -2051,12 +2178,45 @@ class XianyuLive:
                                 chat_id
                             )
                     else:
+                        consumed_count = int(
+                            delivery_context.get("batch_data_required_count") or 0
+                        )
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="needs_review" if consumed_count else "failed",
+                            current_step=(
+                                "inventory_consumed_content_unavailable"
+                                if consumed_count
+                                else "content_unavailable"
+                            ),
+                            expected_count=quantity_to_send,
+                            acquired_count=consumed_count,
+                            sent_count=0,
+                            error_summary=(
+                                "库存已扣减但发货内容未能生成，请人工核对"
+                                if consumed_count
+                                else "未找到匹配的发货规则或获取发货内容失败"
+                            ),
+                        )
                         logger.warning(f'[{msg_time}] 【自动发货】未找到匹配的发货规则或获取发货内容失败')
                         # 发送自动发货失败通知
-                        await self.send_delivery_failure_notification(send_user_name, send_user_id, item_id, "未找到匹配的发货规则或获取发货内容失败", chat_id)
+                        failure_message = (
+                            "库存已扣减但发货内容未能生成，请人工核对"
+                            if consumed_count
+                            else "未找到匹配的发货规则或获取发货内容失败"
+                        )
+                        await self.send_delivery_failure_notification(
+                            send_user_name, send_user_id, item_id, failure_message, chat_id
+                        )
 
                 except Exception as e:
                     logger.error(f"自动发货处理异常: {self._safe_str(e)}")
+                    db_manager.update_auto_delivery_run(
+                        delivery_run_id,
+                        status="needs_review",
+                        current_step="processing_exception",
+                        error_summary=self._safe_str(e),
+                    )
                     # 发送自动发货异常通知
                     await self.send_delivery_failure_notification(send_user_name, send_user_id, item_id, f"自动发货处理异常: {str(e)}", chat_id)
 
@@ -2064,6 +2224,19 @@ class XianyuLive:
 
         except Exception as e:
             logger.error(f"统一自动发货处理异常: {self._safe_str(e)}")
+            if delivery_run_id is not None:
+                try:
+                    db_manager.update_auto_delivery_run(
+                        delivery_run_id,
+                        status="needs_review",
+                        current_step="processing_exception",
+                        error_summary=self._safe_str(e),
+                    )
+                except Exception as ledger_error:
+                    logger.error(
+                        f"【{self.cookie_id}】持久化发货异常状态失败: "
+                        f"{self._safe_str(ledger_error)}"
+                    )
 
 
 
@@ -3156,6 +3329,10 @@ class XianyuLive:
                     
             else:
                 logger.warning(f"【{self.cookie_id}】密码登录失败，未获取到Cookie")
+                await self.send_token_refresh_notification(
+                    "账号密码登录失败，未能获取有效Cookie，请检查账号凭据或完成重新扫码登录。",
+                    "password_login_failed",
+                )
                 return False
 
         except Exception as refresh_e:
@@ -4829,68 +5006,123 @@ class XianyuLive:
         except:
             return 0.0
 
-    async def send_system_notification(self, message: str) -> int:
-        """把系统级消息推送到该账号绑定的全部通知渠道。
+    async def _send_audited_notification_event(
+        self,
+        notifications: list,
+        message: str,
+        event_type: str,
+        source: str = "runtime",
+        attachment_path: str = None,
+    ) -> int:
+        """Send configured event notifications and persist per-channel outcomes."""
+        if not message or not notifications:
+            return 0
+        from app.db_manager import db_manager
+        from app.services.notification_sender import (
+            NotificationSendError,
+            NotificationSendTimeout,
+            NotificationSender,
+        )
 
-        与 :meth:`send_notification` 的区别是不依赖买家消息上下文，
-        供发货超时告警这类主动通知使用。
-
-        Returns:
-            成功发送的渠道数。
-        """
-        if not message:
+        user_id = self.user_id or db_manager.get_cookie_owner_user(self.cookie_id)
+        if not user_id:
+            logger.error(f"通知审计缺少账号所有者，跳过发送: cookie_id={self.cookie_id}")
             return 0
 
+        sender = NotificationSender()
+        sent = 0
+        for notification in notifications:
+            if not notification.get("enabled", True):
+                continue
+            request_id = secrets.token_hex(6)
+            try:
+                audit_id = db_manager.add_notification_delivery_log(
+                    cookie_id=self.cookie_id,
+                    channel_id=notification["channel_id"],
+                    rule_id=notification.get("id"),
+                    event_type=event_type,
+                    source=source,
+                    request_id=request_id,
+                    status="unknown",
+                )
+            except Exception as audit_error:
+                logger.error(
+                    f"通知发送前无法创建审计记录，已跳过: event={event_type} "
+                    f"request_id={request_id} error={self._safe_str(audit_error)}"
+                )
+                continue
+
+            try:
+                channel_type = notification.get("channel_type", "")
+                channel_config = notification.get("channel_config", "")
+                await sender.send(
+                    channel_type,
+                    channel_config,
+                    message,
+                    request_id=request_id,
+                    attachment_path=attachment_path if channel_type == "email" else None,
+                )
+                db_manager.update_notification_delivery_log(
+                    audit_id, int(user_id), "success"
+                )
+                sent += 1
+            except Exception as notify_error:
+                unknown = isinstance(notify_error, NotificationSendTimeout) or (
+                    isinstance(notify_error, NotificationSendError)
+                    and notify_error.category in {"network", "timeout"}
+                )
+                error_code = getattr(
+                    notify_error, "code", "notification_send_failed"
+                )
+                error_summary = getattr(
+                    notify_error,
+                    "public_message",
+                    "通知发送失败，请检查渠道配置和网络",
+                )
+                try:
+                    db_manager.update_notification_delivery_log(
+                        audit_id,
+                        int(user_id),
+                        "unknown" if unknown else "failed",
+                        error_code=error_code,
+                        error_summary=error_summary,
+                    )
+                except Exception as audit_error:
+                    logger.error(
+                        f"通知失败审计记录未能保存: event={event_type} "
+                        f"request_id={request_id} error={self._safe_str(audit_error)}"
+                    )
+                logger.error(
+                    f"通知发送失败: event={event_type} request_id={request_id} "
+                    f"code={error_code} status={'unknown' if unknown else 'failed'}"
+                )
+        return sent
+
+    async def send_system_notification(
+        self, message: str, event_type: str = "delivery_timeout"
+    ) -> int:
+        """Send an account-level event only to channels subscribed to its type."""
+        if not message:
+            return 0
         try:
             from app.db_manager import db_manager
 
-            notifications = db_manager.get_account_notifications(self.cookie_id) or []
-        except Exception as e:
-            logger.error(f"📱 读取通知渠道失败: {self._safe_str(e)}")
+            notifications = db_manager.get_account_notifications(
+                self.cookie_id, event_type=event_type
+            ) or []
+            return await self._send_audited_notification_event(
+                notifications, message, event_type
+            )
+        except Exception as error:
+            logger.error(f"发送系统通知失败: {self._safe_str(error)}")
             return 0
-
-        sent = 0
-        for notification in notifications:
-            if not notification.get('enabled', True):
-                continue
-
-            channel_type = notification.get('channel_type')
-            try:
-                config_data = self._parse_notification_config(
-                    notification.get('channel_config')
-                )
-                match channel_type:
-                    case 'ding_talk' | 'dingtalk':
-                        await self._send_dingtalk_notification(config_data, message)
-                    case 'feishu' | 'lark':
-                        await self._send_feishu_notification(config_data, message)
-                    case 'bark':
-                        await self._send_bark_notification(config_data, message)
-                    case 'email':
-                        await self._send_email_notification(config_data, message)
-                    case 'webhook':
-                        await self._send_webhook_notification(config_data, message)
-                    case 'wechat':
-                        await self._send_wechat_notification(config_data, message)
-                    case 'telegram':
-                        await self._send_telegram_notification(config_data, message)
-                    case _:
-                        logger.warning(f"📱 不支持的通知渠道类型: {channel_type}")
-                        continue
-                sent += 1
-            except Exception as notify_error:
-                logger.error(
-                    f"📱 发送系统通知失败 ({notification.get('channel_name', 'Unknown')}): "
-                    f"{self._safe_str(notify_error)}"
-                )
-
-        return sent
 
     async def send_notification(self, send_user_name: str, send_user_id: str, send_message: str, item_id: str = None, chat_id: str = None):
         """发送消息通知"""
         try:
             from app.db_manager import db_manager
             import hashlib
+            import secrets
 
             # 过滤系统默认消息，不发送通知
             system_messages = [
@@ -4932,13 +5164,15 @@ class XianyuLive:
             logger.info(f"📱 开始发送消息通知 - 账号: {self.cookie_id}, 买家: {send_user_name}")
 
             # 获取当前账号的通知配置
-            notifications = db_manager.get_account_notifications(self.cookie_id)
+            notifications = db_manager.get_account_notifications(
+                self.cookie_id, event_type="buyer_message"
+            )
 
             if not notifications:
                 logger.warning(f"📱 账号 {self.cookie_id} 未配置消息通知，跳过通知发送")
                 return
 
-            logger.info(f"📱 找到 {len(notifications)} 个通知渠道配置")
+            logger.info(f"📱 找到 {len(notifications)} 个买家消息订阅渠道")
 
             # 构建通知消息
             notification_msg = f"🚨 接收消息通知\n\n" \
@@ -4949,51 +5183,9 @@ class XianyuLive:
                              f"消息内容: {send_message}\n" \
                              f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-            # 发送通知到各个渠道
-            for i, notification in enumerate(notifications, 1):
-                logger.info(f"📱 处理第 {i} 个通知渠道: {notification.get('channel_name', 'Unknown')}")
-
-                if not notification.get('enabled', True):
-                    logger.warning(f"📱 通知渠道 {notification.get('channel_name')} 已禁用，跳过")
-                    continue
-
-                channel_type = notification.get('channel_type')
-                channel_config = notification.get('channel_config')
-
-                logger.info(f"📱 渠道类型: {channel_type}")
-
-                try:
-                    # 解析配置数据
-                    config_data = self._parse_notification_config(channel_config)
-                    match channel_type:
-                        case 'ding_talk' | 'dingtalk':
-                            logger.info(f"📱 开始发送钉钉通知...")
-                            await self._send_dingtalk_notification(config_data, notification_msg)
-                        case 'feishu' | 'lark':
-                            logger.info(f"📱 开始发送飞书通知...")
-                            await self._send_feishu_notification(config_data, notification_msg)
-                        case 'bark':
-                            logger.info(f"📱 开始发送Bark通知...")
-                            await self._send_bark_notification(config_data, notification_msg)
-                        case 'email':
-                            logger.info(f"📱 开始发送邮件通知...")
-                            await self._send_email_notification(config_data, notification_msg)
-                        case 'webhook':
-                            logger.info(f"📱 开始发送Webhook通知...")
-                            await self._send_webhook_notification(config_data, notification_msg)
-                        case 'wechat':
-                            logger.info(f"📱 开始发送微信通知...")
-                            await self._send_wechat_notification(config_data, notification_msg)
-                        case 'telegram':
-                            logger.info(f"📱 开始发送Telegram通知...")
-                            await self._send_telegram_notification(config_data, notification_msg)
-                        case _:
-                            logger.warning(f"📱 不支持的通知渠道类型: {channel_type}")
-
-                except Exception as notify_error:
-                    logger.error(f"📱 发送通知失败 ({notification.get('channel_name', 'Unknown')}): {self._safe_str(notify_error)}")
-                    import traceback
-                    logger.error(f"📱 详细错误信息: {traceback.format_exc()}")
+            await self._send_audited_notification_event(
+                notifications, notification_msg, "buyer_message"
+            )
 
         except Exception as e:
             logger.error(f"📱 处理消息通知失败: {self._safe_str(e)}")
@@ -5498,9 +5690,13 @@ class XianyuLive:
                 return
 
             from app.db_manager import db_manager
+            from app.notification_events import resolve_event_type
 
             # 获取当前账号的通知配置
-            notifications = db_manager.get_account_notifications(self.cookie_id)
+            event_type = resolve_event_type(notification_type)
+            notifications = db_manager.get_account_notifications(
+                self.cookie_id, event_type=event_type
+            )
 
             if not notifications:
                 logger.warning("未配置消息通知，跳过Token刷新通知")
@@ -5527,47 +5723,12 @@ class XianyuLive:
 
             logger.info(f"准备发送Token刷新异常通知: {self.cookie_id}")
 
-            # 发送通知到各个渠道
-            notification_sent = False
-            for notification in notifications:
-                if not notification.get('enabled', True):
-                    continue
-
-                channel_type = notification.get('channel_type')
-                channel_config = notification.get('channel_config')
-
-                try:
-                    # 解析配置数据
-                    config_data = self._parse_notification_config(channel_config)
-
-                    match channel_type:
-                        case 'ding_talk' | 'dingtalk':
-                            await self._send_dingtalk_notification(config_data, notification_msg)
-                            notification_sent = True
-                        case 'feishu' | 'lark':
-                            await self._send_feishu_notification(config_data, notification_msg)
-                            notification_sent = True
-                        case 'bark':
-                            await self._send_bark_notification(config_data, notification_msg)
-                            notification_sent = True
-                        case 'email':
-                            # 邮件支持附件
-                            await self._send_email_notification(config_data, notification_msg, attachment_path)
-                            notification_sent = True
-                        case 'webhook':
-                            await self._send_webhook_notification(config_data, notification_msg)
-                            notification_sent = True
-                        case 'wechat':
-                            await self._send_wechat_notification(config_data, notification_msg)
-                            notification_sent = True
-                        case 'telegram':
-                            await self._send_telegram_notification(config_data, notification_msg)
-                            notification_sent = True
-                        case _:
-                            logger.warning(f"不支持的通知渠道类型: {channel_type}")
-
-                except Exception as notify_error:
-                    logger.error(f"发送Token刷新通知失败 ({notification.get('channel_name', 'Unknown')}): {self._safe_str(notify_error)}")
+            notification_sent = await self._send_audited_notification_event(
+                notifications,
+                notification_msg,
+                event_type,
+                attachment_path=attachment_path,
+            )
 
             # 如果成功发送了通知，更新最后发送时间
             if notification_sent:
@@ -5660,64 +5821,38 @@ class XianyuLive:
         return False
 
     async def send_delivery_failure_notification(self, send_user_name: str, send_user_id: str, item_id: str, error_message: str, chat_id: str = None):
-        """发送自动发货失败通知"""
+        """Send a delivery outcome only to channels subscribed to that event."""
         try:
             from app.db_manager import db_manager
 
-            # 获取当前账号的通知配置
-            notifications = db_manager.get_account_notifications(self.cookie_id)
+            result_text = error_message or ""
+            if "确认发货失败" in result_text:
+                event_type = "delivery_confirm_failed"
+            elif "成功" in result_text and "失败" not in result_text:
+                event_type = "delivery_success"
+            else:
+                event_type = "delivery_failed"
+            notifications = db_manager.get_account_notifications(
+                self.cookie_id, event_type=event_type
+            )
 
             if not notifications:
-                logger.warning("未配置消息通知，跳过自动发货通知")
+                logger.debug(f"未配置 {event_type} 订阅，跳过发货通知")
                 return
 
-            # 构造通知消息
-            notification_message = f"🚨 自动发货通知\n\n" \
+            title = "✅ 自动发货成功通知" if event_type == "delivery_success" else "🚨 自动发货异常通知"
+            action = "无需处理。" if event_type == "delivery_success" else "请及时处理！"
+            notification_message = f"{title}\n\n" \
                                  f"账号: {self.cookie_id}\n" \
                                  f"买家: {send_user_name} (ID: {send_user_id})\n" \
                                  f"商品ID: {item_id}\n" \
                                  f"聊天ID: {chat_id or '未知'}\n" \
                                  f"结果: {error_message}\n" \
                                  f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n" \
-                                 f"请及时处理！"
-
-            # 发送通知到所有已启用的通知渠道
-            for notification in notifications:
-                if notification.get('enabled', False):
-                    channel_type = notification.get('channel_type', 'qq')
-                    channel_config = notification.get('channel_config', '')
-
-                    try:
-                        # 解析配置数据
-                        config_data = self._parse_notification_config(channel_config)
-
-                        match channel_type:
-                            case 'ding_talk' | 'dingtalk':
-                                await self._send_dingtalk_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到钉钉")
-                            case 'email':
-                                await self._send_email_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到邮箱")
-                            case 'webhook':
-                                await self._send_webhook_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到Webhook")
-                            case 'wechat':
-                                await self._send_wechat_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到微信")
-                            case 'telegram':
-                                await self._send_telegram_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到Telegram")
-                            case 'bark':
-                                await self._send_bark_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到Bark")
-                            case 'feishu' | 'lark':
-                                await self._send_feishu_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到飞书")
-                            case _:
-                                logger.warning(f"不支持的通知渠道类型: {channel_type}")
-
-                    except Exception as notify_error:
-                        logger.error(f"发送自动发货通知失败: {self._safe_str(notify_error)}")
+                                 f"{action}"
+            await self._send_audited_notification_event(
+                notifications, notification_message, event_type
+            )
 
         except Exception as e:
             logger.error(f"发送自动发货通知异常: {self._safe_str(e)}")
@@ -6338,6 +6473,10 @@ class XianyuLive:
                             batch_queue = db_manager.consume_batch_data_batch(
                                 rule['card_id'],
                                 required_count,
+                                order_id=order_id,
+                                item_id=item_id,
+                                buyer_id=send_user_id,
+                                cookie_id=self.cookie_id,
                             )
                             if not batch_queue:
                                 logger.warning(

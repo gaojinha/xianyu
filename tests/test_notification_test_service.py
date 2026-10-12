@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from app.db_manager import DBManager
 from app.services.notification_channels import NotificationChannelConfigError
@@ -148,6 +149,34 @@ class NotificationSenderTests(unittest.TestCase):
         self.assertEqual(receipt.channel_type, "email")
         self.assertEqual(len(calls), 1)
 
+    def test_email_attachment_is_preserved(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as attachment:
+            attachment.write(b"image-data")
+            attachment.flush()
+            smtp = Mock()
+
+            with patch(
+                "app.services.notification_sender.smtplib.SMTP",
+                return_value=smtp,
+            ):
+                NotificationSender._send_email_sync(
+                    {
+                        "smtp_server": "smtp.example.test",
+                        "smtp_port": 587,
+                        "email_user": "sender@example.test",
+                        "email_password": "password",
+                        "recipient_email": "recipient@example.test",
+                    },
+                    "notification",
+                    attachment.name,
+                )
+
+            email = smtp.send_message.call_args.args[0]
+            self.assertEqual(
+                email.get_payload()[-1].get_filename(),
+                os.path.basename(attachment.name),
+            )
+
     def test_provider_status_and_timeout_are_normalized(self):
         rejected_factory = _SessionFactory(
             lambda _method, _url, _kwargs: _Response(status=503, body={"error": "private"})
@@ -178,10 +207,19 @@ class _TargetDB:
     def __init__(self, target=None):
         self.target = target
         self.calls = []
+        self.delivery_logs = []
 
     def get_notification_test_target(self, rule_id, user_id):
         self.calls.append((rule_id, user_id))
         return self.target
+
+    def add_notification_delivery_log(self, **fields):
+        self.delivery_logs.append(dict(fields))
+        return len(self.delivery_logs)
+
+    def update_notification_delivery_log(self, log_id, user_id, status, **fields):
+        self.delivery_logs[log_id - 1].update(status=status, **fields)
+        return True
 
 
 class _RecordingSender:
@@ -234,6 +272,7 @@ class NotificationTestServiceTests(unittest.TestCase):
         self.assertEqual([entry[0] for entry in logs], ["info", "info"])
         self.assertTrue(all("secret" not in entry[1] for entry in logs))
         self.assertTrue(all("token" not in entry[1] for entry in logs))
+        self.assertEqual("success", service.db.delivery_logs[0]["status"])
 
     def test_unauthorized_target_does_not_send(self):
         sender = _RecordingSender()
@@ -266,6 +305,14 @@ class NotificationTestServiceTests(unittest.TestCase):
                 self.run_async(service.send_rule_test(7, 42))
             self.assertEqual(raised.exception.code, code)
             self.assertEqual(raised.exception.status_code, status)
+            expected_status = "unknown" if isinstance(
+                error, (NotificationSendTimeout, NotificationNetworkError)
+            ) or type(error) is RuntimeError else "failed"
+            self.assertEqual(
+                expected_status,
+                service.db.delivery_logs[0]["status"],
+                type(error).__name__,
+            )
 
         sender = _RecordingSender()
         service = NotificationTestService(

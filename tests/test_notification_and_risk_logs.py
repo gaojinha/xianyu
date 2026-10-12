@@ -127,5 +127,78 @@ class RiskControlLogIsolationTests(unittest.TestCase):
         )
 
 
+class NotificationDeliveryLogTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = DBManager(os.path.join(self.temp_dir.name, "notification-logs.db"))
+        cursor = self.manager.conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES ('owner', 'owner@example.test', 'hash')"
+        )
+        self.user_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES ('other', 'other@example.test', 'hash')"
+        )
+        self.other_user_id = cursor.lastrowid
+        cursor.executemany(
+            "INSERT INTO cookies (id, value, user_id) VALUES (?, 'cookie', ?)",
+            [("owned-account", self.user_id), ("other-account", self.other_user_id)],
+        )
+        cursor.execute(
+            "INSERT INTO notification_channels (name, type, config, user_id) VALUES ('owned-channel', 'webhook', '{}', ?)",
+            (self.user_id,),
+        )
+        self.channel_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO message_notifications (cookie_id, channel_id, enabled) VALUES ('owned-account', ?, 1)",
+            (self.channel_id,),
+        )
+        self.rule_id = cursor.lastrowid
+        self.manager.conn.commit()
+
+    def tearDown(self):
+        self.manager.close()
+        self.temp_dir.cleanup()
+
+    def test_delivery_logs_are_owner_scoped_and_never_store_message_content(self):
+        log_id = self.manager.add_notification_delivery_log(
+            cookie_id="owned-account",
+            channel_id=self.channel_id,
+            rule_id=self.rule_id,
+            event_type="buyer_message",
+            source="runtime",
+            request_id="abc123",
+            status="unknown",
+            error_code="notification_send_timeout",
+            error_summary="timeout token=secret-value",
+        )
+        self.assertTrue(
+            self.manager.update_notification_delivery_log(
+                log_id,
+                self.user_id,
+                "unknown",
+                error_code="notification_send_timeout",
+                error_summary="timeout token=secret-value",
+            )
+        )
+
+        owner_logs = self.manager.get_notification_delivery_logs(self.user_id)
+
+        self.assertEqual(1, len(owner_logs))
+        self.assertEqual("unknown", owner_logs[0]["status"])
+        self.assertEqual("abc123", owner_logs[0]["request_id"])
+        self.assertNotIn("secret-value", owner_logs[0]["error_summary"])
+        self.assertNotIn("buyer message body", str(owner_logs[0]))
+        self.assertEqual([], self.manager.get_notification_delivery_logs(self.other_user_id))
+
+    def test_delivery_log_rejects_cross_owner_account_channel_pair(self):
+        with self.assertRaisesRegex(ValueError, "ownership mismatch"):
+            self.manager.add_notification_delivery_log(
+                cookie_id="other-account",
+                channel_id=self.channel_id,
+                status="failed",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

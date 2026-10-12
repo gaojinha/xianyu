@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
   BellRing,
@@ -7,6 +7,7 @@ import {
   CircleAlert,
   ChevronLeft,
   ChevronRight,
+  ClipboardList,
   Edit3,
   Link2,
   Loader2,
@@ -27,6 +28,7 @@ import {
   NotificationEventDefinition,
   NotificationPriority,
   NotificationPriorityDefinition,
+  NotificationDeliveryLog,
   RiskControlLog,
   SystemLog,
 } from '../types';
@@ -39,6 +41,7 @@ import {
   getMessageNotifications,
   getNotificationChannels,
   getNotificationEvents,
+  getNotificationDeliveryLogs,
   getRiskControlLogs,
   getSystemLogs,
   setMessageNotification,
@@ -49,7 +52,7 @@ import {
 import { confirmAction, notify } from '../services/feedback';
 import { EmptyState, PageHeader, PageTabs, SectionHeader } from './ui';
 
-type PageTab = 'channels' | 'bindings' | 'risk' | 'system';
+type PageTab = 'channels' | 'bindings' | 'delivery' | 'risk' | 'system';
 
 interface NotificationsAndLogsProps {
   isAdmin: boolean;
@@ -188,6 +191,10 @@ const NotificationsAndLogs: React.FC<NotificationsAndLogsProps> = ({ isAdmin }) 
   const [riskStatus, setRiskStatus] = useState('');
   const [riskPage, setRiskPage] = useState(0);
   const [riskLoading, setRiskLoading] = useState(false);
+  const [deliveryLogs, setDeliveryLogs] = useState<NotificationDeliveryLog[]>([]);
+  const [deliveryAccount, setDeliveryAccount] = useState('');
+  const [deliveryStatus, setDeliveryStatus] = useState('');
+  const [deliveryLoading, setDeliveryLoading] = useState(false);
   const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
   const [systemLevel, setSystemLevel] = useState('');
   const [systemSource, setSystemSource] = useState('');
@@ -219,6 +226,21 @@ const NotificationsAndLogs: React.FC<NotificationsAndLogsProps> = ({ isAdmin }) 
       setLoadingBase(false);
     }
   };
+
+  const loadDeliveryLogs = useCallback(async () => {
+    setDeliveryLoading(true);
+    try {
+      setDeliveryLogs(await getNotificationDeliveryLogs({
+        cookieId: deliveryAccount || undefined,
+        status: (deliveryStatus || undefined) as NotificationDeliveryLog['status'] | undefined,
+        limit: 200,
+      }));
+    } catch (error) {
+      notify(`加载通知投递记录失败：${(error as Error).message}`, 'error');
+    } finally {
+      setDeliveryLoading(false);
+    }
+  }, [deliveryAccount, deliveryStatus]);
 
   useEffect(() => {
     void loadBaseData();
@@ -498,11 +520,16 @@ const NotificationsAndLogs: React.FC<NotificationsAndLogsProps> = ({ isAdmin }) 
     if (activeTab === 'system' && isAdmin) void loadSystemLogs();
   }, [activeTab]);
 
+  useEffect(() => {
+    if (activeTab === 'delivery') void loadDeliveryLogs();
+  }, [activeTab, loadDeliveryLogs]);
+
   const riskPageCount = Math.max(1, Math.ceil(riskTotal / PAGE_SIZE));
 
   const tabs: Array<{ id: PageTab; label: string; icon: typeof BellRing }> = [
     { id: 'channels', label: '通知渠道', icon: BellRing },
     { id: 'bindings', label: '账号通知', icon: Link2 },
+    { id: 'delivery', label: '投递记录', icon: ClipboardList },
     { id: 'risk', label: '风控日志', icon: ShieldAlert },
     ...(isAdmin ? [{ id: 'system' as PageTab, label: '系统日志', icon: Activity }] : []),
   ];
@@ -784,6 +811,87 @@ const NotificationsAndLogs: React.FC<NotificationsAndLogsProps> = ({ isAdmin }) 
                   <p>{log.event_description || log.processing_result || '无详细描述'}</p>
                   {log.processing_result && log.event_description && (
                     <p className="mt-1 text-xs text-gray-500">{log.processing_result}</p>
+                  )}
+
+                  {activeTab === 'delivery' && (
+                    <section className="section-panel">
+                      <SectionHeader
+                        title="通知投递记录"
+                        description="查看测试发送和账号事件通知结果。超时或网络中断会标记为结果未知，不会自动重发。"
+                        icon={ClipboardList}
+                        actions={(
+                          <button
+                            type="button"
+                            onClick={() => void loadDeliveryLogs()}
+                            disabled={deliveryLoading}
+                            className="ios-btn-secondary flex items-center gap-2 rounded-md px-4 py-2.5 text-sm"
+                          >
+                            <RefreshCw className={`h-4 w-4 ${deliveryLoading ? 'animate-spin' : ''}`} />
+                            刷新
+                          </button>
+                        )}
+                      />
+                      <div className="toolbar rounded-none border-x-0 border-t-0 shadow-none">
+                        <div className="toolbar__group">
+                          <select
+                            value={deliveryAccount}
+                            onChange={(event) => setDeliveryAccount(event.target.value)}
+                            className="ios-input rounded-md px-3 py-2.5 text-sm sm:min-w-56"
+                          >
+                            <option value="">全部账号</option>
+                            {accounts.map((account) => (
+                              <option key={account.id} value={account.id}>{accountLabel(account)}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={deliveryStatus}
+                            onChange={(event) => setDeliveryStatus(event.target.value)}
+                            className="ios-input rounded-md px-3 py-2.5 text-sm sm:min-w-40"
+                          >
+                            <option value="">全部状态</option>
+                            <option value="success">成功</option>
+                            <option value="failed">失败</option>
+                            <option value="unknown">结果未知</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="divide-y divide-gray-100 px-4">
+                        {deliveryLogs.map((log) => (
+                          <div key={log.id} className="grid gap-3 py-4 lg:grid-cols-[180px_130px_minmax(0,1fr)]">
+                            <div>
+                              <p className="break-all text-sm font-bold text-gray-900">
+                                {accounts.find((account) => account.id === log.cookie_id)?.nickname ||
+                                  accounts.find((account) => account.id === log.cookie_id)?.remark ||
+                                  log.cookie_id}
+                              </p>
+                              <p className="mt-1 text-xs text-gray-500">{formatTime(log.created_at)}</p>
+                            </div>
+                            <div>
+                              <span className={`inline-flex rounded px-2 py-1 text-xs font-bold ${
+                                log.status === 'success'
+                                  ? 'bg-emerald-50 text-emerald-700'
+                                  : log.status === 'failed'
+                                    ? 'bg-red-50 text-red-700'
+                                    : 'bg-amber-50 text-amber-700'
+                              }`}>
+                                {log.status === 'success' ? '成功' : log.status === 'failed' ? '失败' : '结果未知'}
+                              </span>
+                              <p className="mt-2 text-xs text-gray-500">
+                                {log.source === 'test' ? '测试发送' : '事件通知'} · {log.channel_name || `渠道 ${log.channel_id}`}
+                              </p>
+                              <p className="text-xs text-gray-500">{log.event_type || '配置测试'}</p>
+                            </div>
+                            <div className="min-w-0 text-sm leading-6 text-gray-700">
+                              <p>追踪 ID：<span className="font-mono text-xs">{log.request_id}</span></p>
+                              {log.error_code && <p className="text-xs text-red-600">{log.error_code}：{log.error_summary}</p>}
+                            </div>
+                          </div>
+                        ))}
+                        {!deliveryLoading && deliveryLogs.length === 0 && (
+                          <EmptyState compact title="暂无通知投递记录" description="发送测试通知或等待账号事件通知后，记录会显示在这里。" icon={ClipboardList} />
+                        )}
+                      </div>
+                    </section>
                   )}
                   {log.error_message && (
                     <p className="mt-1 break-words text-xs text-red-600">{log.error_message}</p>

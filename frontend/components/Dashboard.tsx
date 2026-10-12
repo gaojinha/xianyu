@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { AdminStats, OrderAnalytics, Order, OrderStatus, Item } from '../types';
-import { getAdminStats, getOrderAnalytics, getValidOrders, getItems } from '../services/api';
+import { AdminStats, OrderAnalytics, Order, OrderStatus, Item, OperationalSummary } from '../types';
+import { getAdminStats, getOrderAnalytics, getOperationalSummary, getValidOrders, getItems } from '../services/api';
 import {TrendingUp, Users, ShoppingCart, AlertCircle, DollarSign, Activity, Package, BarChart3, PackageCheck, ExternalLink, RefreshCw} from 'lucide-react';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, Legend } from 'recharts';
 import { EmptyState, PageHeader, PageLoading, PageTabs, SectionHeader } from './ui';
@@ -49,7 +49,7 @@ const StatCard: React.FC<{ title: string; value: string | number; icon: React.El
 
 type TimeRange = 'today' | 'yesterday' | '3days' | '7days' | '30days' | 'custom';
 
-const Dashboard: React.FC = () => {
+const Dashboard: React.FC<{ onNavigate?: (tab: string) => void }> = ({ onNavigate }) => {
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [analytics, setAnalytics] = useState<OrderAnalytics | null>(null);
   const [timeRange, setTimeRange] = useState<TimeRange>('7days');
@@ -59,6 +59,9 @@ const Dashboard: React.FC = () => {
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const [operations, setOperations] = useState<OperationalSummary | null>(null);
+  const [operationsError, setOperationsError] = useState('');
+  const [operationsLoading, setOperationsLoading] = useState(true);
 
   // 搜索词
   const [searchTerm, setSearchTerm] = useState('');
@@ -300,6 +303,27 @@ const Dashboard: React.FC = () => {
     };
   }, [timeRange, reloadToken]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setOperationsLoading(true);
+    setOperationsError('');
+    getOperationalSummary()
+      .then((result) => {
+        if (!cancelled) setOperations(result);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setOperationsError(error instanceof Error ? error.message : '运营审计指标读取失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setOperationsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadToken]);
+
   // 加载订单列表
   useEffect(() => {
     const { startDate, endDate } = getDatesForRange(timeRange);
@@ -522,6 +546,92 @@ const Dashboard: React.FC = () => {
           colorClass="bg-[#c9b8e8]"
         />
       </div>
+
+      <section className="section-panel">
+        <SectionHeader
+          title="自动化与通知审计"
+          description={operations
+            ? `最近 ${operations.period_days} 天 · 数据更新于 ${new Date(operations.generated_at).toLocaleString('zh-CN')}`
+            : '汇总可追溯的发货、通知和商品自动化执行记录。'}
+          icon={Activity}
+        />
+        {operationsLoading ? (
+          <p className="p-4 text-sm text-gray-500">正在读取审计指标…</p>
+        ) : operationsError ? (
+          <div className="flex items-center gap-2 p-4 text-sm text-red-700" role="alert">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>审计指标加载失败：{operationsError}</span>
+            <button
+              type="button"
+              onClick={() => setReloadToken((value) => value + 1)}
+              className="ml-auto underline"
+            >
+              重试
+            </button>
+          </div>
+        ) : operations ? (
+          <div className="space-y-4 p-4">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+              {[
+                ['发货完成', operations.delivery_runs.completed, 'text-emerald-700'],
+                ['发货失败 / 待核对', operations.delivery_runs.failed + operations.delivery_runs.needs_review, 'text-red-700'],
+                ['通知失败 / 不确定', operations.notification_deliveries.failed + operations.notification_deliveries.unknown, 'text-amber-700'],
+                ['商品自动化失败', operations.automation_runs.failed, 'text-red-700'],
+                ['AI 回复失败 / 不确定', operations.ai_replies.failed + operations.ai_replies.uncertain, 'text-amber-700'],
+              ].map(([label, value, color]) => (
+                <div key={String(label)} className="rounded-md border border-gray-200 p-3">
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className={`mt-1 text-xl font-bold ${color}`}>{value}</p>
+                </div>
+              ))}
+            </div>
+            {operations.recent_records.length > 0 ? (
+              <div className="overflow-x-auto rounded-md border border-gray-200">
+                <table className="data-table min-w-[760px] text-sm">
+                  <thead>
+                    <tr><th>时间</th><th>类别</th><th>状态</th><th>账号 / 关联对象</th><th>记录</th><th>查看</th></tr>
+                  </thead>
+                  <tbody>
+                    {operations.recent_records.map((record) => (
+                      <tr key={`${record.kind}-${record.record_id}`}>
+                        <td>{record.updated_at ? new Date(record.updated_at.replace(' ', 'T') + (record.updated_at.includes('Z') ? '' : 'Z')).toLocaleString('zh-CN') : '-'}</td>
+                        <td>{record.event || record.kind}</td>
+                        <td>{({
+                          completed: '完成',
+                          failed: '失败',
+                          needs_review: '待人工核对',
+                          processing: '处理中',
+                          success: '成功',
+                          unknown: '结果不确定',
+                        } as Record<string, string>)[record.status] || record.status}</td>
+                        <td className="font-mono text-xs">{record.cookie_id || '—'} / {record.reference || '—'}</td>
+                        <td className="max-w-64 truncate">{record.summary || '无异常摘要'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            onClick={() => onNavigate?.(
+                              record.kind === 'delivery' ? 'orders'
+                                : record.kind === 'notification' ? 'notifications'
+                                  : record.kind === 'ai_reply' ? 'ai-reply'
+                                  : 'product-automation',
+                            )}
+                            className="text-amber-700 underline"
+                          >
+                            打开相关页面
+                          </button>
+                          <span className="ml-1 font-mono text-xs text-gray-400">#{record.record_id}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">所选周期内暂无自动化或通知记录。</p>
+            )}
+          </div>
+        ) : null}
+      </section>
 
       {/* Main Chart Section */}
       <div className="section-panel">

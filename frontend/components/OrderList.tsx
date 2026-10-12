@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Order, OrderStatus, Item, AccountDetail } from '../types';
-import { getOrders, syncOrders, syncSingleOrder, manualShipOrder, updateOrder, deleteOrder, importOrders, getItems, syncSoldOrders, getAccountDetails, requireOrderFlower, rateOrders, getSellerFeatureFlags } from '../services/api';
+import { Order, OrderStatus, Item, AccountDetail, AutoDeliveryRun } from '../types';
+import { getOrders, syncOrders, syncSingleOrder, manualShipOrder, updateOrder, deleteOrder, importOrders, getItems, syncSoldOrders, getAccountDetails, requireOrderFlower, rateOrders, getSellerFeatureFlags, getAutoDeliveryRuns, resolveAutoDeliveryRun } from '../services/api';
 import { confirmAction, notify } from '../services/feedback';
 import { Search, Truck, RefreshCw, ChevronLeft, ChevronRight, PackageCheck, Edit, Eye, Plus, Save, X, ExternalLink, Trash2, ClipboardList, Flower2, Star } from 'lucide-react';
 import { EmptyState, PageHeader, PageTabs } from './ui';
@@ -58,6 +58,7 @@ const OrderList: React.FC = () => {
   const [importText, setImportText] = useState('');
   const [showShipModal, setShowShipModal] = useState(false);
   const [shipOrderId, setShipOrderId] = useState<string>('');
+  const [shipReason, setShipReason] = useState('');
   const [shipLoading, setShipLoading] = useState(false);
   const [shipResult, setShipResult] = useState<{success: boolean; message: string} | null>(null);
   const [syncingOrderId, setSyncingOrderId] = useState<string | null>(null);
@@ -77,6 +78,10 @@ const OrderList: React.FC = () => {
   const [rateValue, setRateValue] = useState<1 | 0 | -1>(1);
   const [rateAnonymous, setRateAnonymous] = useState(false);
   const [rateSubmitting, setRateSubmitting] = useState(false);
+  const [showDeliveryRuns, setShowDeliveryRuns] = useState(false);
+  const [deliveryRuns, setDeliveryRuns] = useState<AutoDeliveryRun[]>([]);
+  const [deliveryRunsLoading, setDeliveryRunsLoading] = useState(false);
+  const [deliveryRunsError, setDeliveryRunsError] = useState('');
 
   // 搜索过滤订单
   const filterOrders = (ordersToFilter: Order[]): Order[] => {
@@ -131,6 +136,35 @@ const OrderList: React.FC = () => {
       } finally {
           if (!options?.silent) setLoading(false);
       }
+  };
+
+  const loadDeliveryRuns = useCallback(async () => {
+    setDeliveryRunsLoading(true);
+    setDeliveryRunsError('');
+    try {
+      const runs = await getAutoDeliveryRuns({
+        cookieId: accountFilter || undefined,
+        limit: 100,
+      });
+      setDeliveryRuns(runs);
+    } catch (error) {
+      console.error('加载自动发货执行记录失败:', error);
+      setDeliveryRunsError('加载失败，请检查网络或稍后重试。');
+    } finally {
+      setDeliveryRunsLoading(false);
+    }
+  }, [accountFilter]);
+
+  const handleResolveDeliveryRun = async (runId: number) => {
+    const note = window.prompt('请记录核对结论（例如已确认发货成功/已确认未发送并转人工处理）');
+    if (!note?.trim()) return;
+    try {
+      await resolveAutoDeliveryRun(runId, note.trim());
+      notify('执行记录已标记为人工核对完成');
+      await loadDeliveryRuns();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '结案失败', 'error');
+    }
   };
 
   // 当订单数据改变时，重新过滤订单
@@ -207,6 +241,10 @@ const OrderList: React.FC = () => {
     const timer = setInterval(syncFlags, 30000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (showDeliveryRuns) void loadDeliveryRuns();
+  }, [loadDeliveryRuns, showDeliveryRuns]);
 
   // 向买家索要小红花：会真实发出一条消息，需二次确认
   const handleRequireFlower = async (order: Order) => {
@@ -295,6 +333,7 @@ const OrderList: React.FC = () => {
 
   const handleShip = (id: string) => {
       setShipOrderId(id);
+      setShipReason('');
       setShipResult(null);
       setShowShipModal(true);
   };
@@ -303,7 +342,7 @@ const OrderList: React.FC = () => {
       setShipLoading(true);
       setShipResult(null);
       try {
-          const res = await manualShipOrder([shipOrderId], mode);
+          const res = await manualShipOrder([shipOrderId], mode, undefined, shipReason.trim());
           const result = res?.results?.[0];
           if (result?.success) {
               setShipResult({ success: true, message: result.message });
@@ -478,6 +517,14 @@ const OrderList: React.FC = () => {
               <Plus className="w-4 h-4" />
               插入订单
             </button>
+            <button
+              onClick={() => setShowDeliveryRuns((visible) => !visible)}
+              className="ios-btn-secondary flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm"
+              aria-expanded={showDeliveryRuns}
+            >
+              <ClipboardList className="h-4 w-4" />
+              发货审计
+            </button>
             <button onClick={handleSync} className="ios-btn-secondary flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm">
                 <Truck className="h-4 w-4" />
                 刷新状态
@@ -521,6 +568,103 @@ const OrderList: React.FC = () => {
           <p className="metric-card__meta">取消 {cancelledCount} / 退款 {refundingCount}</p>
         </div>
       </div>
+
+      {showDeliveryRuns && (
+        <section className="section-panel">
+          <div className="section-panel__header flex-wrap">
+            <div>
+              <h2 className="text-base font-bold text-gray-900">自动发货执行记录</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                显示最近 100 条；异常或进程中断记录不会自动重发，请核对订单与聊天记录后人工处理。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadDeliveryRuns()}
+              disabled={deliveryRunsLoading}
+              className="ios-btn-secondary rounded-md px-3 py-2 text-sm disabled:opacity-60"
+            >
+              {deliveryRunsLoading ? '刷新中…' : '刷新记录'}
+            </button>
+          </div>
+          {deliveryRunsError ? (
+            <div className="p-4 text-sm text-red-600" role="alert">{deliveryRunsError}</div>
+          ) : deliveryRunsLoading && deliveryRuns.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500">正在加载执行记录…</div>
+          ) : deliveryRuns.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500">暂无自动发货执行记录。</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="data-table min-w-[900px]">
+                <thead>
+                  <tr>
+                    <th>订单 / 账号</th>
+                    <th>状态 / 步骤</th>
+                    <th>发货进度</th>
+                    <th>异常说明</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deliveryRuns.map((run) => {
+                    const account = accounts.find((candidate) => candidate.id === run.cookie_id);
+                    const statusLabel = {
+                      processing: '处理中/待核对',
+                      completed: '已完成',
+                      failed: '失败',
+                      needs_review: '需人工核对',
+                    }[run.status];
+                    return (
+                      <tr key={run.id}>
+                        <td>
+                          <div className="font-mono text-xs text-gray-900">{run.order_id}</div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {account?.nickname || account?.remark || run.cookie_id} · {run.trigger_name}
+                          </div>
+                          {run.operator_reason && (
+                            <div className="mt-1 max-w-xs whitespace-normal break-words text-xs text-gray-500">
+                              原因：{run.operator_reason}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          <div className={`text-xs font-semibold ${run.status === 'needs_review' ? 'text-amber-700' : run.status === 'failed' ? 'text-red-600' : 'text-gray-700'}`}>
+                            {run.resolved_at ? '已人工核对' : statusLabel}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {run.current_step} · 尝试 {run.attempt_count}
+                             {run.resolved_at ? ' · 已人工核对' : ''}
+                           </div>
+                        </td>
+                        <td className="text-xs text-gray-700">
+                          已发送 {run.sent_count} / {run.expected_count}
+                          <div className="mt-1 text-gray-500">已取出 {run.acquired_count}</div>
+                        </td>
+                        <td className="max-w-sm whitespace-normal break-words text-xs text-gray-600">
+                          {run.error_summary || '—'}
+                          {run.resolution_note && (
+                            <div className="mt-1 text-gray-500">核对结论：{run.resolution_note}</div>
+                          )}
+                          {(run.status === 'processing' || run.status === 'failed' || run.status === 'needs_review') && !run.resolved_at && (
+                            <button
+                              type="button"
+                              onClick={() => void handleResolveDeliveryRun(run.id)}
+                              className="mt-2 rounded border border-amber-300 px-2 py-1 text-amber-800 hover:bg-amber-50"
+                            >
+                              记录核对结论
+                            </button>
+                          )}
+                        </td>
+                        <td className="text-xs text-gray-500">{run.updated_at}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="section-panel">
         {/* Toolbar */}
@@ -965,6 +1109,17 @@ const OrderList: React.FC = () => {
 
             <div className="modal-body space-y-4">
               <p className="text-sm text-gray-600">请选择发货方式：</p>
+              <label className="block space-y-1">
+                <span className="text-sm font-medium text-gray-700">完整发货原因（必填）</span>
+                <textarea
+                  value={shipReason}
+                  onChange={(event) => setShipReason(event.target.value)}
+                  maxLength={1000}
+                  rows={2}
+                  placeholder="说明为何需要补发，并确认已核对历史聊天和发货记录"
+                  className="w-full rounded-md border border-gray-300 p-2 text-sm"
+                />
+              </label>
 
               {/* 选项A: 仅修改发货状态 */}
               <button
@@ -991,7 +1146,7 @@ const OrderList: React.FC = () => {
               <button
                 type="button"
                 onClick={() => executeShip('full_delivery')}
-                disabled={shipLoading}
+                disabled={shipLoading || !shipReason.trim()}
                 className="w-full rounded-md border border-gray-200 p-4 text-left transition-colors hover:border-amber-400 hover:bg-yellow-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <div className="flex items-start gap-3">

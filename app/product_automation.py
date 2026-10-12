@@ -1,7 +1,9 @@
 import json
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -131,6 +133,16 @@ class ProductAutomationService:
                     details TEXT DEFAULT '[]',
                     error_message TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS bulk_listing_preflight_imports (
+                    preflight_run_id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'imported')),
+                    imported_at TIMESTAMP,
+                    FOREIGN KEY (preflight_run_id) REFERENCES automation_task_runs(id) ON DELETE CASCADE,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
@@ -473,6 +485,252 @@ class ProductAutomationService:
             len(items), len(matched), changed, 0, summary, details,
         )
         return {"run_id": run_id, "summary": summary, "details": details}
+
+    @staticmethod
+    def _bulk_image_list(value: Any) -> List[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = [part.strip() for part in value.split("|")]
+        else:
+            parsed = value
+        if not isinstance(parsed, list):
+            raise ValueError("图片必须是 URL 数组")
+        if len(parsed) > 9:
+            raise ValueError("每件商品最多填写 9 张图片")
+        normalized = []
+        for value in parsed:
+            image_url = str(value or "").strip()
+            parsed_url = urlsplit(image_url)
+            if (
+                parsed_url.scheme not in {"http", "https"}
+                or not parsed_url.hostname
+                or parsed_url.username
+                or parsed_url.password
+            ):
+                raise ValueError("图片必须使用不含凭据的 HTTP/HTTPS 绝对 URL")
+            normalized.append(image_url)
+        return normalized
+
+    def preflight_bulk_listing(
+        self,
+        user_id: int,
+        cookie_id: str,
+        rows: List[Dict[str, Any]],
+        source_name: str = "",
+    ) -> Dict[str, Any]:
+        self.require_account(user_id, cookie_id)
+        if not rows or len(rows) > 200:
+            raise ValueError("批次必须包含 1-200 行商品数据")
+        seen_ids = set()
+        details = []
+        valid_count = 0
+        failed_count = 0
+        with self.db.lock:
+            cursor = self.db.conn.cursor()
+            for index, row in enumerate(rows, start=2):
+                errors = []
+                item = dict(row) if isinstance(row, dict) else {}
+                source_item_id = str(item.get("source_item_id") or "").strip()
+                title = str(item.get("title") or "").strip()
+                description = str(item.get("description") or "").strip()
+                category = str(item.get("category") or "").strip()
+                source_url = str(item.get("source_url") or "").strip()
+                delivery_content = str(item.get("delivery_content") or "").strip()
+                raw_price = str(item.get("price") or "").strip()
+                try:
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    price = None
+
+                if not source_item_id or len(source_item_id) > 128:
+                    errors.append("来源商品 ID 必填且不能超过 128 个字符")
+                elif source_item_id in seen_ids:
+                    errors.append("批次内来源商品 ID 重复")
+                else:
+                    seen_ids.add(source_item_id)
+                    cursor.execute(
+                        """
+                        SELECT 1 FROM product_materials
+                        WHERE user_id = ? AND cookie_id = ? AND source_item_id = ?
+                        """,
+                        (user_id, cookie_id, source_item_id),
+                    )
+                    if cursor.fetchone():
+                        errors.append("素材库已存在该来源商品 ID")
+                if not title or len(title) > 200:
+                    errors.append("商品标题必填且不能超过 200 个字符")
+                if len(description) > 10000:
+                    errors.append("商品描述不能超过 10000 个字符")
+                if not category or len(category) > 100:
+                    errors.append("分类必填且不能超过 100 个字符")
+                if price is None or not math.isfinite(price) or price <= 0:
+                    errors.append("价格必须是大于 0 的有效数字")
+                if source_url:
+                    parsed_url = urlsplit(source_url)
+                    if (
+                        parsed_url.scheme not in {"http", "https"}
+                        or not parsed_url.hostname
+                        or parsed_url.username
+                        or parsed_url.password
+                    ):
+                        errors.append("来源链接必须是无凭据的 HTTP/HTTPS 绝对 URL")
+                try:
+                    images = self._bulk_image_list(item.get("images"))
+                except ValueError as error:
+                    images = []
+                    errors.append(str(error))
+                if len(delivery_content) > 10000:
+                    errors.append("发货内容不能超过 10000 个字符")
+
+                normalized = {
+                    "source_item_id": source_item_id,
+                    "title": title,
+                    "description": description,
+                    "category": category,
+                    "price": price,
+                    "images": images,
+                    "source_url": source_url,
+                    "delivery_content": delivery_content,
+                }
+                valid = not errors
+                valid_count += int(valid)
+                failed_count += int(not valid)
+                details.append({
+                    "row": index,
+                    "status": "valid" if valid else "invalid",
+                    "errors": errors,
+                    "material": normalized if valid else {
+                        "source_item_id": source_item_id,
+                        "title": title,
+                    },
+                })
+
+        summary = (
+            f"预检 {len(rows)} 行：{valid_count} 行有效，{failed_count} 行有错误；"
+            "尚未导入草稿或发布商品"
+        )
+        run_id = self._record_run(
+            user_id,
+            cookie_id,
+            "bulk_listing_preflight",
+            None,
+            "preflight",
+            len(rows),
+            valid_count,
+            0,
+            failed_count,
+            summary,
+            details,
+            error="有无效行" if failed_count else "",
+        )
+        with self.db.lock:
+            self.db.conn.execute(
+                "INSERT INTO bulk_listing_preflight_imports (preflight_run_id, user_id) VALUES (?, ?)",
+                (run_id, user_id),
+            )
+            self.db.conn.commit()
+        return {
+            "run_id": run_id,
+            "summary": summary,
+            "valid_count": valid_count,
+            "failed_count": failed_count,
+            "details": details,
+            "source_name": str(source_name or "")[:255],
+        }
+
+    def import_preflight_drafts(
+        self, user_id: int, preflight_run_id: int, confirmed: bool
+    ) -> Dict[str, Any]:
+        if not confirmed:
+            raise ValueError("必须明确确认后才能导入本地草稿")
+        with self.db.lock:
+            cursor = self.db.conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute(
+                    """
+                    SELECT r.cookie_id, r.details
+                    FROM automation_task_runs r
+                    JOIN bulk_listing_preflight_imports p ON p.preflight_run_id = r.id
+                    WHERE r.id = ? AND r.user_id = ?
+                      AND r.task_type = 'bulk_listing_preflight'
+                      AND r.execution_mode = 'preflight'
+                    """,
+                    (preflight_run_id, user_id),
+                )
+                result = cursor.fetchone()
+                if not result:
+                    raise LookupError("预检批次不存在或无权限")
+                cookie_id, raw_details = result
+                self.require_account(user_id, cookie_id)
+                cursor.execute(
+                    "SELECT status FROM bulk_listing_preflight_imports WHERE preflight_run_id = ?",
+                    (preflight_run_id,),
+                )
+                preflight_status = cursor.fetchone()
+                if not preflight_status:
+                    raise LookupError("预检批次不可用")
+                if preflight_status[0] != "pending":
+                    raise ValueError("该预检批次已导入，不能重复提交")
+                details = _json_value(raw_details, [])
+                valid_rows = [
+                    item["material"] for item in details
+                    if item.get("status") == "valid"
+                ]
+                existing_ids = {
+                    str(row[0]) for row in cursor.execute(
+                        "SELECT source_item_id FROM product_materials WHERE user_id = ? AND cookie_id = ?",
+                        (user_id, cookie_id),
+                    ).fetchall()
+                }
+                if any(row["source_item_id"] in existing_ids for row in valid_rows):
+                    raise ValueError("预检后素材库已变化，请重新预检后再导入")
+                if not valid_rows:
+                    raise ValueError("该预检批次没有可导入的有效行")
+                for material in valid_rows:
+                    cursor.execute(
+                        """
+                        INSERT INTO product_materials (
+                            user_id, cookie_id, source_item_id, title, description,
+                            category, price, images, source_url, delivery_content,
+                            publish_status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+                        """,
+                        (
+                            user_id,
+                            cookie_id,
+                            material["source_item_id"],
+                            material["title"],
+                            material["description"],
+                            material["category"],
+                            material["price"],
+                            json.dumps(material["images"], ensure_ascii=False),
+                            material["source_url"],
+                            material["delivery_content"],
+                        ),
+                    )
+                cursor.execute(
+                    """
+                    UPDATE bulk_listing_preflight_imports
+                    SET status = 'imported', imported_at = CURRENT_TIMESTAMP
+                    WHERE preflight_run_id = ? AND status = 'pending'
+                    """,
+                    (preflight_run_id,),
+                )
+                self.db.conn.commit()
+            except Exception:
+                self.db.conn.rollback()
+                raise
+        return {
+            "preflight_run_id": preflight_run_id,
+            "imported_count": len(valid_rows),
+            "publish_status": "draft",
+            "message": "有效行已导入本地素材草稿；未执行平台发布",
+        }
 
     def list_delete_rules(self, user_id: int) -> List[Dict[str, Any]]:
         with self.db.lock:

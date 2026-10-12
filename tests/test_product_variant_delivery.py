@@ -1,7 +1,9 @@
 import asyncio
 import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, patch
 
 from app.db_manager import DBManager
@@ -353,11 +355,64 @@ class ProductVariantDeliveryTests(unittest.TestCase):
         card_id = cursor.lastrowid
         self.manager.conn.commit()
 
-        consumed = self.manager.consume_batch_data_batch(card_id, 2)
+        consumed = self.manager.consume_batch_data_batch(
+            card_id,
+            2,
+            order_id="order-inventory-audit",
+            item_id="item-1",
+            buyer_id="buyer-1",
+            cookie_id="seller-1",
+        )
 
         self.assertEqual(["CODE-1", "CODE-2"], consumed)
         cursor.execute("SELECT data_content FROM cards WHERE id = ?", (card_id,))
         self.assertEqual("CODE-3", cursor.fetchone()[0])
+        cursor.execute(
+            """
+            SELECT order_id, item_id, buyer_id, cookie_id
+            FROM card_shipments
+            WHERE card_id = ?
+            ORDER BY id
+            """,
+            (card_id,),
+        )
+        self.assertEqual(
+            [("order-inventory-audit", "item-1", "buyer-1", "seller-1")] * 2,
+            cursor.fetchall(),
+        )
+
+    def test_concurrent_batch_consumers_cannot_take_the_same_inventory(self):
+        cursor = self.manager.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO cards (name, type, data_content, enabled, user_id)
+            VALUES ('one-time-stock', 'data', 'ONLY-ONE', 1, 1)
+            """
+        )
+        card_id = cursor.lastrowid
+        self.manager.conn.commit()
+        second_manager = DBManager(self.manager.db_path)
+        barrier = threading.Barrier(2)
+
+        def consume(manager):
+            barrier.wait()
+            return manager.consume_batch_data_batch(card_id, 1, order_id="order-race")
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(consume, (self.manager, second_manager)))
+        finally:
+            second_manager.close()
+
+        self.assertEqual(1, sum(result is not None for result in results))
+        remaining = self.manager.conn.execute(
+            "SELECT data_content FROM cards WHERE id = ?", (card_id,)
+        ).fetchone()[0]
+        shipment_count = self.manager.conn.execute(
+            "SELECT COUNT(*) FROM card_shipments WHERE card_id = ?", (card_id,)
+        ).fetchone()[0]
+        self.assertEqual("", remaining)
+        self.assertEqual(1, shipment_count)
 
     def test_delivery_flow_does_not_partially_consume_batch_inventory(self):
         from XianyuAutoAsync import XianyuLive

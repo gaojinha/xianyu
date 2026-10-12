@@ -151,6 +151,29 @@ export interface CardShipment {
   shipped_at: string;
 }
 
+export interface AutoDeliveryRun {
+  id: number;
+  cookie_id: string;
+  order_id: string;
+  trigger_name: string;
+  item_id: string;
+  buyer_id: string;
+  chat_id: string;
+  status: 'processing' | 'completed' | 'failed' | 'needs_review';
+  current_step: string;
+  attempt_count: number;
+  expected_count: number;
+  acquired_count: number;
+  sent_count: number;
+  error_summary: string;
+  operator_reason: string;
+  resolution_note?: string;
+  started_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  resolved_at?: string | null;
+}
+
 // Items
 export interface Item {
   id: string | number;
@@ -398,6 +421,21 @@ export interface NotificationPriorityDefinition {
   label: string;
 }
 
+export interface NotificationDeliveryLog {
+  id: number;
+  cookie_id: string;
+  rule_id?: number | null;
+  channel_id: number;
+  channel_name?: string | null;
+  event_type: string;
+  source: 'runtime' | 'test';
+  request_id: string;
+  status: 'success' | 'failed' | 'unknown';
+  error_code: string;
+  error_summary: string;
+  created_at: string;
+}
+
 export interface RiskControlLog {
   id: number;
   cookie_id: string;
@@ -619,6 +657,7 @@ export interface AnnouncementItem {
 
 export interface AnnouncementPayload {
   local_version: string;
+  build_revision?: string;
   latest_version: string;
   download_url: string;
   release_notes: string;
@@ -626,4 +665,23 @@ export interface AnnouncementPayload {
   source_configured: boolean;
   error: string;
   announcements: AnnouncementItem[];
+}
+
+export interface OperationalSummary {
+  period_days: number;
+  generated_at: string;
+  delivery_runs: Record<'completed' | 'failed' | 'needs_review' | 'processing', number>;
+  notification_deliveries: Record<'success' | 'failed' | 'unknown', number>;
+  automation_runs: { total: number; failed: number };
+  ai_replies: { total: number; failed: number; uncertain: number };
+  recent_records: Array<{
+    kind: 'delivery' | 'notification' | 'automation';
+    record_id: number;
+    cookie_id: string;
+    reference: string;
+    status: string;
+    event: string;
+    summary: string;
+    updated_at: string;
+  }>;
 }

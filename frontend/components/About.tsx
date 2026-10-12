@@ -68,6 +68,11 @@ const About: React.FC = () => {
             <p className="mt-1 text-2xl font-bold text-gray-900">
               {data?.local_version || '—'}
             </p>
+            {data?.build_revision && data.build_revision !== 'unknown' && (
+              <p className="mt-1 font-mono text-xs text-gray-500">
+                构建提交：{data.build_revision.slice(0, 12)}
+              </p>
+            )}
           </div>
 
           <div className={`rounded-md border p-4 ${

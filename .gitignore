@@ -63,6 +63,8 @@ Thumbs.db
 # Local environment files
 .env.local
 .env.*.local
+*.key
+*.key.next
 
 # ==================== 项目特定文件 ====================
 # 日志文件
@@ -294,6 +296,7 @@ build/
 !LICENSE.md
 !STAR_HISTORY.md
 !docs/*.md
+!.github/copilot-instructions.md
 
 # 临时配置文件
 *.local.yml

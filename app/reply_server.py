@@ -355,9 +355,11 @@ class ResponseModel(BaseModel):
     data: ResponseData
 
 
+from app.announcement import get_local_version
+
 app = FastAPI(
     title="Xianyu Auto Reply API",
-    version="2.5.0",
+    version=get_local_version(),
     description="闲鱼自动回复系统API",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -445,6 +447,8 @@ async def health_check():
         status = {
             "status": "healthy" if manager_status == "ok" and db_status == "ok" else "unhealthy",
             "timestamp": time.time(),
+            "version": get_local_version(),
+            "revision": os.getenv("APP_BUILD_REVISION", "unknown"),
             "services": {
                 "cookie_manager": manager_status,
                 "database": db_status
@@ -3590,6 +3594,34 @@ async def test_message_notification_rule(
         ) from exc
 
 
+@app.get("/notification-delivery-logs")
+def get_notification_delivery_logs(
+    cookie_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        if cookie_id and db_manager.get_cookie_owner_user(cookie_id) != current_user["user_id"]:
+            raise HTTPException(status_code=403, detail="无权访问该账号")
+        return {
+            "success": True,
+            "data": db_manager.get_notification_delivery_logs(
+                current_user["user_id"],
+                cookie_id=cookie_id,
+                status=status,
+                limit=limit,
+            ),
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("读取通知投递记录失败")
+        raise HTTPException(status_code=500, detail="读取通知投递记录失败") from exc
+
+
 @app.get('/message-notifications/{cid}')
 def get_account_notifications(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定账号的消息通知配置"""
@@ -5037,6 +5069,73 @@ def get_card_shipments(limit: int = 200, current_user: Dict[str, Any] = Depends(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/delivery/automation-runs")
+def get_auto_delivery_runs(
+    cookie_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """获取当前用户的自动发货执行记录，不返回发货内容或凭据。"""
+    user_id = current_user["user_id"]
+    if cookie_id and db_manager.get_cookie_owner_user(cookie_id) != user_id:
+        raise HTTPException(status_code=403, detail="无权限访问该账号")
+    if status and status not in {"processing", "completed", "failed", "needs_review"}:
+        raise HTTPException(status_code=400, detail="无效的执行状态")
+
+    try:
+        runs = db_manager.get_auto_delivery_runs(
+            user_id=user_id,
+            cookie_id=cookie_id,
+            status=status,
+            limit=limit,
+        )
+        return {"success": True, "runs": runs}
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("获取自动发货执行记录失败")
+        raise HTTPException(status_code=500, detail="获取自动发货执行记录失败")
+
+
+@app.post("/delivery/automation-runs/{run_id}/resolve")
+def resolve_auto_delivery_run(
+    run_id: int,
+    note: str = Body(..., embed=True, description="核对结论"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    if not note or not note.strip() or len(note) > 1000:
+        raise HTTPException(status_code=400, detail="核对结论不能为空且不能超过1000个字符")
+    try:
+        user_id = current_user["user_id"]
+        run = db_manager.get_auto_delivery_run(run_id=run_id, user_id=user_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="执行记录不存在或无权访问")
+        if run["status"] == "processing":
+            manager = cookie_manager.manager
+            task = manager.tasks.get(run["cookie_id"]) if manager else None
+            if task and not task.done():
+                raise HTTPException(
+                    status_code=409,
+                    detail="账号监听任务仍在运行，请先停止该账号并核对订单后再结案",
+                )
+        resolved = db_manager.resolve_auto_delivery_run(
+            run_id=run_id,
+            user_id=user_id,
+            note=note,
+        )
+        if not resolved:
+            raise HTTPException(
+                status_code=409,
+                detail=                "执行记录已核对、尚未超时或当前状态不可结案",
+            )
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("结案自动发货执行记录失败")
+        raise HTTPException(status_code=500, detail="结案自动发货执行记录失败")
+
 
 @app.delete("/cards/shipped")
 def clear_card_shipments(current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -5480,6 +5579,87 @@ def run_product_filter_rule(
             "success": True,
             "data": product_automation.run_filter_rule(
                 current_user["user_id"], rule_id
+            ),
+        }
+    except Exception as error:
+        _raise_product_automation_error(error)
+
+
+@app.post("/product-automation/bulk/preflight")
+async def preflight_bulk_product_file(
+    cookie_id: str = Form(...),
+    upload_file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    import csv
+    import os
+
+    filename = os.path.basename(upload_file.filename or "")
+    suffix = os.path.splitext(filename)[1].lower()
+    if suffix not in {".csv", ".tsv"}:
+        raise HTTPException(status_code=400, detail="仅支持 UTF-8 CSV 或 TSV 文件")
+    raw = await upload_file.read(5 * 1024 * 1024 + 1)
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="上传文件不能超过 5 MB")
+    try:
+        text = raw.decode("utf-8-sig")
+        reader = csv.DictReader(
+            io.StringIO(text),
+            delimiter="\t" if suffix == ".tsv" else ",",
+            strict=True,
+        )
+        headers = [str(header or "").strip().lower() for header in (reader.fieldnames or [])]
+        required = {
+            "source_item_id", "title", "description", "category", "price",
+            "images", "source_url", "delivery_content",
+        }
+        if not headers or len(headers) != len(set(headers)):
+            raise ValueError("文件缺少有效表头或包含重复列名")
+        if not required.issubset(headers):
+            raise ValueError(
+                f"缺少必需列: {', '.join(sorted(required - set(headers)))}"
+            )
+        rows = []
+        for row in reader:
+            if None in row:
+                raise ValueError("存在列数多于表头的行")
+            rows.append({str(key).strip().lower(): value for key, value in row.items()})
+            if len(rows) > 200:
+                raise ValueError("每个批次最多允许 200 行")
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise HTTPException(status_code=400, detail="CSV/TSV 格式无效，请使用 UTF-8 编码") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        return {
+            "success": True,
+            "data": product_automation.preflight_bulk_listing(
+                int(current_user["user_id"]),
+                cookie_id,
+                rows,
+                source_name=filename,
+            ),
+        }
+    except Exception as error:
+        _raise_product_automation_error(error)
+
+
+@app.post("/product-automation/bulk/preflight/{run_id}/import")
+def import_bulk_product_drafts(
+    run_id: int,
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        if payload.get("confirmed") is not True:
+            raise ValueError("请先确认将有效行导入本地素材草稿")
+        return {
+            "success": True,
+            "data": product_automation.import_preflight_drafts(
+                int(current_user["user_id"]),
+                run_id,
+                confirmed=True,
             ),
         }
     except Exception as error:
@@ -7287,6 +7467,17 @@ def get_system_stats(current_user: Dict[str, Any] = Depends(require_auth)):
         log_with_user('error', f"获取系统统计信息失败: {str(e)}", current_user)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get('/dashboard/operations')
+def get_dashboard_operations(current_user: Dict[str, Any] = Depends(require_auth)):
+    """Return owner-scoped delivery, notification, and automation audit metrics."""
+    try:
+        return db_manager.get_operational_summary(int(current_user["user_id"]), days=7)
+    except Exception:
+        logger.exception("获取运营审计指标失败")
+        raise HTTPException(status_code=500, detail="运营审计指标读取失败")
+
+
 # ------------------------- BI报表分析接口 -------------------------
 
 @app.get('/analytics/orders')
@@ -7528,7 +7719,9 @@ def get_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any] = 
 def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)):
     """下载数据库备份文件（管理员专用）"""
     import os
+    import tempfile
     from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
     from datetime import datetime
 
     try:
@@ -7538,7 +7731,7 @@ def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)
         from app.db_manager import db_manager
         db_file_path = db_manager.db_path
 
-        # 检查数据库文件是否存在
+        # The live database file may not include uncheckpointed WAL pages.
         if not os.path.exists(db_file_path):
             log_with_user('error', f"数据库文件不存在: {db_file_path}", admin_user)
             raise HTTPException(status_code=404, detail="数据库文件不存在")
@@ -7546,13 +7739,27 @@ def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)
         # 生成带时间戳的文件名
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         download_filename = f"xianyu_backup_{timestamp}.db"
+        database_directory = os.path.dirname(os.path.abspath(db_file_path))
+        fd, snapshot_path = tempfile.mkstemp(
+            prefix="xianyu-download-backup-",
+            suffix=".db",
+            dir=database_directory,
+        )
+        os.close(fd)
 
-        log_with_user('info', f"开始下载数据库备份: {download_filename}", admin_user)
+        try:
+            db_manager.backup_to(snapshot_path)
+        except Exception:
+            if os.path.exists(snapshot_path):
+                os.remove(snapshot_path)
+            raise
 
+        log_with_user('info', f"开始下载一致性数据库快照: {download_filename}", admin_user)
         return FileResponse(
-            path=db_file_path,
+            path=snapshot_path,
             filename=download_filename,
-            media_type='application/octet-stream'
+            media_type='application/octet-stream',
+            background=BackgroundTask(os.remove, snapshot_path),
         )
 
     except HTTPException:
@@ -7566,26 +7773,47 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
                                 backup_file: UploadFile = File(...)):
     """上传并恢复数据库备份文件（管理员专用）"""
     import os
-    import shutil
     import sqlite3
+    import tempfile
     from datetime import datetime
 
     try:
         log_with_user('info', f"开始上传数据库备份: {backup_file.filename}", admin_user)
+        from app.db_manager import db_manager
+        current_db_path = db_manager.db_path
+        database_directory = os.path.dirname(os.path.abspath(current_db_path))
+        manager = cookie_manager.manager
+
+        def active_listener_accounts():
+            return [
+                cookie_id for cookie_id, task in (manager.tasks.items() if manager else [])
+                if not task.done()
+            ]
+
+        if active_listener_accounts():
+            raise HTTPException(
+                status_code=409,
+                detail="恢复数据库前请先停止所有账号监听任务",
+            )
 
         # 验证文件类型
-        if not backup_file.filename.endswith('.db'):
+        if not (backup_file.filename or "").lower().endswith('.db'):
             log_with_user('warning', f"无效的备份文件类型: {backup_file.filename}", admin_user)
             raise HTTPException(status_code=400, detail="只支持.db格式的数据库文件")
 
         # 验证文件大小（限制100MB）
-        content = await backup_file.read()
+        content = await backup_file.read(100 * 1024 * 1024 + 1)
         if len(content) > 100 * 1024 * 1024:  # 100MB
             log_with_user('warning', f"备份文件过大: {len(content)} bytes", admin_user)
             raise HTTPException(status_code=400, detail="备份文件大小不能超过100MB")
 
         # 验证是否为有效的SQLite数据库文件
-        temp_file_path = f"temp_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        fd, temp_file_path = tempfile.mkstemp(
+            prefix="xianyu-restore-upload-",
+            suffix=".db",
+            dir=database_directory,
+        )
+        os.close(fd)
 
         try:
             # 保存临时文件
@@ -7594,10 +7822,16 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
 
             # 验证数据库文件完整性
             conn = sqlite3.connect(temp_file_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = cursor.fetchall()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA quick_check")
+                integrity = cursor.fetchone()
+                if not integrity or integrity[0] != "ok":
+                    raise sqlite3.DatabaseError("SQLite integrity check failed")
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                tables = cursor.fetchall()
+            finally:
+                conn.close()
 
             # 检查是否包含必要的表
             table_names = [table[0] for table in tables]
@@ -7613,48 +7847,62 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
         except sqlite3.Error as e:
             log_with_user('error', f"备份文件验证失败: {str(e)}", admin_user)
             if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+                try:
+                    os.remove(temp_file_path)
+                except OSError as cleanup_error:
+                    log_with_user(
+                        'warning',
+                        f"恢复成功，但临时上传文件清理失败: {cleanup_error}",
+                        admin_user,
+                    )
             raise HTTPException(status_code=400, detail="无效的数据库文件")
 
-        # 备份当前数据库
-        from app.db_manager import db_manager
-        current_db_path = db_manager.db_path
+        if active_listener_accounts():
+            raise HTTPException(
+                status_code=409,
+                detail="检测到账号监听任务已启动，请停止所有任务后重试",
+            )
 
-        # 生成备份文件路径（与原数据库在同一目录）
-        db_dir = os.path.dirname(current_db_path)
-        backup_filename = f"xianyu_data_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        backup_current_path = os.path.join(db_dir, backup_filename)
+        # Snapshot through SQLite so current WAL pages are included.
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        fd, backup_current_path = tempfile.mkstemp(
+            prefix=f"xianyu_data_backup_{timestamp}_",
+            suffix=".db",
+            dir=database_directory,
+        )
+        os.close(fd)
+        db_manager.backup_to(backup_current_path)
+        log_with_user('info', f"当前数据库一致性快照已保存: {backup_current_path}", admin_user)
 
-        if os.path.exists(current_db_path):
-            shutil.copy2(current_db_path, backup_current_path)
-            log_with_user('info', f"当前数据库已备份为: {backup_current_path}", admin_user)
-
-        # 关闭当前数据库连接
-        if hasattr(db_manager, 'conn') and db_manager.conn:
-            db_manager.conn.close()
-            log_with_user('info', "已关闭当前数据库连接", admin_user)
-
-        # 替换数据库文件
-        shutil.move(temp_file_path, current_db_path)
-        log_with_user('info', f"数据库文件已替换: {current_db_path}", admin_user)
-
-        # 重新初始化数据库连接（使用原有的db_path）
-        db_manager.__init__(db_manager.db_path)
-        log_with_user('info', "数据库连接已重新初始化", admin_user)
-
-        # 验证新数据库
         try:
-            test_users = db_manager.get_all_users()
+            with db_manager.lock:
+                db_manager.restore_from_backup(temp_file_path)
+                test_users = db_manager.get_all_users()
+                if manager:
+                    manager.reload_from_db()
+                    if manager.cookies != db_manager.get_all_cookies():
+                        raise RuntimeError("Account cache did not match restored database")
             log_with_user('info', f"数据库恢复成功，包含 {len(test_users)} 个用户", admin_user)
-        except Exception as e:
-            log_with_user('error', f"数据库恢复后验证失败: {str(e)}", admin_user)
-            # 如果验证失败，尝试恢复原数据库
-            if os.path.exists(backup_current_path):
-                shutil.copy2(backup_current_path, current_db_path)
-                db_manager.__init__()
-                log_with_user('info', "已恢复原数据库", admin_user)
-            raise HTTPException(status_code=500, detail="数据库恢复失败，已回滚到原数据库")
+        except Exception as restore_error:
+            log_with_user('error', f"数据库恢复失败，准备回滚: {str(restore_error)}", admin_user)
+            try:
+                with db_manager.lock:
+                    db_manager.restore_from_backup(backup_current_path)
+                    if manager:
+                        manager.reload_from_db()
+                        if manager.cookies != db_manager.get_all_cookies():
+                            raise RuntimeError("Account cache did not match rollback database")
+                log_with_user('info', "数据库恢复失败，已回滚到原数据库", admin_user)
+            except Exception as rollback_error:
+                logger.critical(f"数据库恢复失败且回滚失败: {rollback_error}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="数据库恢复和回滚均失败，请立即从服务器备份文件手动恢复",
+                ) from rollback_error
+            raise HTTPException(status_code=500, detail="数据库恢复失败，已回滚到原数据库") from restore_error
 
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
         return {
             "success": True,
             "message": "数据库恢复成功",
@@ -7663,12 +7911,18 @@ async def upload_database_backup(admin_user: Dict[str, Any] = Depends(require_ad
         }
 
     except HTTPException:
+        for path_name in ("temp_file_path",):
+            cleanup_path = locals().get(path_name)
+            if cleanup_path and os.path.exists(cleanup_path):
+                os.remove(cleanup_path)
         raise
     except Exception as e:
         log_with_user('error', f"上传数据库备份失败: {str(e)}", admin_user)
         # 清理临时文件
         if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        if 'backup_current_path' in locals() and os.path.exists(backup_current_path):
+            os.remove(backup_current_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/admin/backup/list')
@@ -8578,6 +8832,7 @@ async def manual_ship_orders(
     order_ids: List[str] = Body(..., description="订单ID列表"),
     ship_mode: str = Body(..., description="发货模式: status_only（仅修改发货状态）或 full_delivery（完整发货流程）"),
     custom_content: Optional[str] = Body(None, description="自定义发货内容（保留兼容）"),
+    operator_reason: Optional[str] = Body(None, description="完整发货的人工操作原因"),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
@@ -8598,6 +8853,10 @@ async def manual_ship_orders(
         # 验证发货模式
         if ship_mode not in ['status_only', 'full_delivery']:
             raise HTTPException(status_code=400, detail="发货模式必须是 status_only 或 full_delivery")
+        if ship_mode == 'full_delivery' and not (operator_reason or "").strip():
+            raise HTTPException(status_code=400, detail="完整发货必须填写人工操作原因")
+        if operator_reason and len(operator_reason) > 1000:
+            raise HTTPException(status_code=400, detail="人工操作原因不能超过1000个字符")
 
         # 获取用户的所有Cookie
         user_cookies = db_manager.get_all_cookies(user_id)
@@ -8608,6 +8867,10 @@ async def manual_ship_orders(
 
         # 遍历每个订单
         for order_id in order_ids:
+            delivery_run_id = None
+            acquired_count = 0
+            sent_count = 0
+            quantity_to_send = 1
             try:
                 # 获取订单信息
                 order = db_manager.get_order_by_id(order_id)
@@ -8751,6 +9014,28 @@ async def manual_ship_orders(
                         failed_count += 1
                         continue
 
+                    claimed, delivery_run = db_manager.claim_auto_delivery_run(
+                        cookie_id=cookie_id,
+                        order_id=order_id,
+                        item_id=item_id,
+                        buyer_id=buyer_id,
+                        chat_id=chat_id,
+                        trigger_name="manual_full_delivery",
+                        operator_reason=operator_reason or "",
+                    )
+                    if not claimed:
+                        results.append({
+                            'order_id': order_id,
+                            'success': False,
+                            'message': (
+                                f"该订单已有人工完整发货记录（{delivery_run['status']}），"
+                                "为避免重复扣库存或重复发送，请先核对执行记录"
+                            )
+                        })
+                        failed_count += 1
+                        continue
+                    delivery_run_id = delivery_run["id"]
+
                     protection_result = await live_instance.apply_delivery_block_rules(
                         order_id=order_id,
                         buyer_id=buyer_id,
@@ -8760,6 +9045,12 @@ async def manual_ship_orders(
                         owner_id=user_id,
                     )
                     if protection_result["action"] == "block":
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="failed",
+                            current_step="blocked_by_delivery_rule",
+                            error_summary=protection_result["reason"],
+                        )
                         results.append({
                             'order_id': order_id,
                             'success': False,
@@ -8803,11 +9094,32 @@ async def manual_ship_orders(
                         log_with_user('error', f"获取第1个卡券失败: {str(e)}", current_user)
                         first_content = None
 
+                    batch_consumed_count = int(
+                        delivery_context.get("batch_data_required_count") or 0
+                    )
+                    if batch_consumed_count:
+                        acquired_count = batch_consumed_count
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="processing",
+                            current_step="inventory_consumed",
+                            expected_count=batch_consumed_count,
+                            acquired_count=acquired_count,
+                        )
+
                     if first_content:
                         delivery_contents.append(first_content)
                         quantity_to_send *= max(
                             1,
                             int(delivery_context.get("delivery_count") or 1),
+                        )
+                        acquired_count = max(acquired_count, len(delivery_contents))
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="processing",
+                            current_step="content_acquired",
+                            expected_count=quantity_to_send,
+                            acquired_count=acquired_count,
                         )
 
                     for i in range(1, quantity_to_send):
@@ -8824,10 +9136,38 @@ async def manual_ship_orders(
                             )
                             if delivery_content:
                                 delivery_contents.append(delivery_content)
+                                acquired_count = max(
+                                    acquired_count,
+                                    len(delivery_contents),
+                                    int(delivery_context.get("batch_data_required_count") or 0),
+                                )
+                                db_manager.update_auto_delivery_run(
+                                    delivery_run_id,
+                                    status="processing",
+                                    current_step="content_acquired",
+                                    expected_count=quantity_to_send,
+                                    acquired_count=acquired_count,
+                                )
                         except Exception as e:
                             log_with_user('error', f"获取第{i+1}个卡券失败: {str(e)}", current_user)
 
                     if not delivery_contents:
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="needs_review" if acquired_count else "failed",
+                            current_step=(
+                                "inventory_consumed_content_unavailable"
+                                if acquired_count
+                                else "content_unavailable"
+                            ),
+                            expected_count=quantity_to_send,
+                            acquired_count=acquired_count,
+                            error_summary=(
+                                "Inventory was consumed but no delivery content was generated"
+                                if acquired_count
+                                else "No delivery content was acquired"
+                            ),
+                        )
                         results.append({
                             'order_id': order_id,
                             'success': False,
@@ -8837,6 +9177,13 @@ async def manual_ship_orders(
                         continue
 
                     # 发送卡券内容给买家
+                    db_manager.update_auto_delivery_run(
+                        delivery_run_id,
+                        status="processing",
+                        current_step="sending_content",
+                        expected_count=quantity_to_send,
+                        acquired_count=acquired_count,
+                    )
                     sent_count = 0
                     send_errors = []
                     for idx, content in enumerate(delivery_contents):
@@ -8853,6 +9200,13 @@ async def manual_ship_orders(
                             if len(delivery_contents) > 1 and idx < len(delivery_contents) - 1:
                                 await asyncio.sleep(1)
                             sent_count += 1
+                            db_manager.update_auto_delivery_run(
+                                delivery_run_id,
+                                status="processing",
+                                current_step="sending_content",
+                                sent_count=sent_count,
+                                acquired_count=acquired_count,
+                            )
                             log_with_user(
                                 'info',
                                 f"第{idx+1}条卡券已发送（{segment_count} 段消息）",
@@ -8894,6 +9248,14 @@ async def manual_ship_orders(
                         db_manager.insert_or_update_order(**update_values)
 
                         if card_only_delivery:
+                            db_manager.update_auto_delivery_run(
+                                delivery_run_id,
+                                status="completed",
+                                current_step="completed_card_only",
+                                expected_count=quantity_to_send,
+                                acquired_count=acquired_count,
+                                sent_count=sent_count,
+                            )
                             results.append({
                                 'order_id': order_id,
                                 'success': True,
@@ -8906,6 +9268,15 @@ async def manual_ship_orders(
                             continue
 
                         if confirm_required and not platform_confirmed:
+                            db_manager.update_auto_delivery_run(
+                                delivery_run_id,
+                                status="needs_review",
+                                current_step="platform_confirmation",
+                                expected_count=quantity_to_send,
+                                acquired_count=acquired_count,
+                                sent_count=sent_count,
+                                error_summary=confirm_error or "Platform confirmation failed",
+                            )
                             results.append({
                                 'order_id': order_id,
                                 'success': False,
@@ -8914,6 +9285,14 @@ async def manual_ship_orders(
                             failed_count += 1
                             continue
 
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="completed",
+                            current_step="completed",
+                            expected_count=quantity_to_send,
+                            acquired_count=acquired_count,
+                            sent_count=sent_count,
+                        )
                         results.append({
                             'order_id': order_id,
                             'success': True,
@@ -8921,6 +9300,15 @@ async def manual_ship_orders(
                         })
                         success_count += 1
                     else:
+                        db_manager.update_auto_delivery_run(
+                            delivery_run_id,
+                            status="needs_review",
+                            current_step="partial_delivery",
+                            expected_count=quantity_to_send,
+                            acquired_count=acquired_count,
+                            sent_count=sent_count,
+                            error_summary="; ".join(send_errors) or "Delivery was incomplete",
+                        )
                         live_instance.delivery_blocked_orders.add(order_id)
                         live_instance.last_delivery_time[order_id] = time.time()
                         detail = f'应发{quantity_to_send}条，获取{len(delivery_contents)}条，成功发送{sent_count}条'
@@ -8934,6 +9322,17 @@ async def manual_ship_orders(
                         failed_count += 1
 
             except Exception as e:
+                if delivery_run_id is not None:
+                    state_uncertain = acquired_count > 0 or sent_count > 0
+                    db_manager.update_auto_delivery_run(
+                        delivery_run_id,
+                        status="needs_review" if state_uncertain else "failed",
+                        current_step="manual_delivery_exception",
+                        expected_count=quantity_to_send,
+                        acquired_count=acquired_count,
+                        sent_count=sent_count,
+                        error_summary=str(e),
+                    )
                 results.append({
                     'order_id': order_id,
                     'success': False,

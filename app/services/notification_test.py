@@ -129,6 +129,15 @@ class NotificationTestService:
 
         request_id = secrets.token_hex(6)
         message = build_test_message(target["cookie_id"]).format(request_id=request_id)
+        audit_id = self.db.add_notification_delivery_log(
+            cookie_id=target["cookie_id"],
+            channel_id=target["channel_id"],
+            rule_id=target["id"],
+            event_type="",
+            source="test",
+            request_id=request_id,
+            status="unknown",
+        )
 
         self._log_safe(
             "info",
@@ -154,40 +163,102 @@ class NotificationTestService:
                     "通知测试发送失败，请稍后重试",
                     status_code=502,
                 )
-        except NotificationChannelConfigError:
+        except NotificationChannelConfigError as exc:
+            self.db.update_notification_delivery_log(
+                audit_id,
+                user_id,
+                "failed",
+                error_code="notification_config_invalid",
+                error_summary=str(exc),
+            )
+            self._log_safe(
+                "error",
+                f"source=notification_test rule_id={rule_id} request_id={request_id} "
+                "result=failed code=notification_config_invalid",
+                operator,
+            )
             raise NotificationTestError(
                 "notification_config_invalid",
                 "通知渠道配置不完整，请先补全再测试",
                 status_code=400,
+            ) from exc
+        except NotificationSendTimeout as exc:
+            self.db.update_notification_delivery_log(
+                audit_id, user_id, "unknown",
+                error_code=exc.code, error_summary=exc.public_message,
             )
-        except NotificationSendTimeout:
+            self._log_safe(
+                "warning",
+                f"source=notification_test rule_id={rule_id} request_id={request_id} "
+                f"result=unknown code={exc.code}",
+                operator,
+            )
             raise NotificationTestError(
                 "notification_send_timeout",
                 "通知渠道响应超时，请检查网络或稍后重试",
                 status_code=504,
-            )
+            ) from exc
         except NotificationProviderRejected as exc:
             status = getattr(exc, "status_code", None) or 502
+            self.db.update_notification_delivery_log(
+                audit_id, user_id, "failed",
+                error_code=exc.code, error_summary=exc.public_message,
+            )
+            self._log_safe(
+                "error",
+                f"source=notification_test rule_id={rule_id} request_id={request_id} "
+                f"result=failed code={exc.code}",
+                operator,
+            )
             raise NotificationTestError(
                 "notification_provider_rejected",
                 "通知渠道拒绝了本次请求",
                 status_code=status,
+            ) from exc
+        except NotificationNetworkError as exc:
+            self.db.update_notification_delivery_log(
+                audit_id, user_id, "unknown",
+                error_code=exc.code, error_summary=exc.public_message,
             )
-        except NotificationNetworkError:
+            self._log_safe(
+                "warning",
+                f"source=notification_test rule_id={rule_id} request_id={request_id} "
+                f"result=unknown code={exc.code}",
+                operator,
+            )
             raise NotificationTestError(
                 "notification_send_failed",
                 "通知渠道网络异常，请稍后重试",
                 status_code=502,
+            ) from exc
+        except NotificationTestError as exc:
+            self.db.update_notification_delivery_log(
+                audit_id, user_id, "failed",
+                error_code=exc.code, error_summary=exc.message,
             )
-        except NotificationTestError:
             raise
-        except Exception:
+        except Exception as exc:
+            self.db.update_notification_delivery_log(
+                audit_id, user_id, "unknown",
+                error_code="notification_send_failed",
+                error_summary="Unexpected notification sender failure",
+            )
+            self._log_safe(
+                "error",
+                f"source=notification_test rule_id={rule_id} request_id={request_id} "
+                "result=unknown code=notification_send_failed",
+                operator,
+            )
             # 未知异常的消息可能包含敏感值，不回显给前端，只给稳定文案
             raise NotificationTestError(
                 "notification_send_failed",
                 "通知测试发送失败，请稍后重试",
                 status_code=502,
-            )
+            ) from exc
+
+        self.db.update_notification_delivery_log(
+            audit_id, user_id, "success"
+        )
 
         self._log_safe(
             "info",

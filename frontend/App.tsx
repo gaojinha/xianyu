@@ -571,7 +571,9 @@ const App: React.FC = () => {
             : 'mx-auto max-w-[1320px] p-4 pb-10 sm:p-6 lg:p-8'
         }>
           <section hidden={activeTab !== 'dashboard'}>
-            <Suspense fallback={activeTab === 'dashboard' ? <PageLoader /> : null}><Dashboard /></Suspense>
+            <Suspense fallback={activeTab === 'dashboard' ? <PageLoader /> : null}>
+              <Dashboard onNavigate={setActiveTab} />
+            </Suspense>
           </section>
           <section hidden={activeTab !== 'accounts'}>
             <Suspense fallback={activeTab === 'accounts' ? <PageLoader /> : null}><AccountList /></Suspense>

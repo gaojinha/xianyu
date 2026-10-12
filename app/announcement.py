@@ -22,6 +22,7 @@
     }
 """
 import asyncio
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -55,7 +56,8 @@ FETCH_TIMEOUT = 8
 # 本软件版本号。发布新版时改这里，并同步更新公网服务器上 JSON 的 latest_version。
 # 注意不要复用 global_config.yml 里的 APP_CONFIG.app_version —— 那是伪装成闲鱼
 # 客户端时上报给平台的协议版本，与本软件版本无关。
-APP_VERSION = '3.2.0'
+APP_VERSION = os.getenv('APP_BUILD_VERSION', '3.2.0').strip() or '3.2.0'
+APP_REVISION = os.getenv('APP_BUILD_REVISION', 'unknown').strip() or 'unknown'
 
 
 def get_local_version() -> str:
@@ -147,6 +149,7 @@ async def get_announcement_payload(force: bool = False) -> Dict[str, Any]:
     local_version = get_local_version()
     base = {
         'local_version': local_version,
+        'build_revision': APP_REVISION,
         'announcements': [],
         'latest_version': '',
         'download_url': '',

@@ -137,6 +137,78 @@ class ProductAutomationServiceTest(unittest.TestCase):
         self.assertEqual(1, len(rules))
         self.assertEqual("published-1", rules[0]["keyword"])
 
+    def test_bulk_preflight_imports_only_valid_rows_as_drafts_once(self):
+        result = self.service.preflight_bulk_listing(
+            1,
+            "account-1",
+            [
+                {
+                    "source_item_id": "bulk-1",
+                    "title": "商品一",
+                    "description": "描述",
+                    "category": "虚拟",
+                    "price": "9.9",
+                    "images": "https://example.test/image.jpg",
+                    "source_url": "https://example.test/item/1",
+                    "delivery_content": "兑换码",
+                },
+                {
+                    "source_item_id": "bulk-2",
+                    "title": "",
+                    "category": "虚拟",
+                    "price": "0",
+                    "images": "",
+                    "source_url": "",
+                },
+            ],
+            source_name="items.csv",
+        )
+
+        self.assertEqual((1, 1), (result["valid_count"], result["failed_count"]))
+        self.assertEqual("items.csv", result["source_name"])
+        self.assertEqual("invalid", result["details"][1]["status"])
+        imported = self.service.import_preflight_drafts(1, result["run_id"], confirmed=True)
+        self.assertEqual(1, imported["imported_count"])
+        self.assertEqual("draft", imported["publish_status"])
+        material = self.service.list_materials(1)[0]
+        self.assertEqual("bulk-1", material["source_item_id"])
+        self.assertEqual("draft", material["publish_status"])
+        self.assertEqual(["https://example.test/image.jpg"], material["images"])
+        with self.assertRaisesRegex(ValueError, "不能重复"):
+            self.service.import_preflight_drafts(1, result["run_id"], confirmed=True)
+
+    def test_bulk_preflight_checks_owner_urls_and_batch_duplicates(self):
+        with self.assertRaisesRegex(PermissionError, "不属于"):
+            self.service.preflight_bulk_listing(
+                2, "account-1", [{"source_item_id": "foreign"}]
+            )
+
+        result = self.service.preflight_bulk_listing(
+            1,
+            "account-1",
+            [
+                {
+                    "source_item_id": "duplicate",
+                    "title": "商品一",
+                    "category": "虚拟",
+                    "price": "1",
+                    "images": "file:///etc/passwd",
+                },
+                {
+                    "source_item_id": "duplicate",
+                    "title": "商品二",
+                    "category": "虚拟",
+                    "price": "1",
+                },
+            ],
+        )
+
+        self.assertEqual(0, result["valid_count"])
+        self.assertTrue(any("HTTP/HTTPS" in error for error in result["details"][0]["errors"]))
+        self.assertTrue(any("批次内" in error for error in result["details"][1]["errors"]))
+        with self.assertRaisesRegex(ValueError, "明确确认"):
+            self.service.import_preflight_drafts(1, result["run_id"], confirmed=False)
+
 
 if __name__ == "__main__":
     unittest.main()
